@@ -19,3 +19,22 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+ACADEMIC USE NOTICE:
+This software was developed as part of a Bachelor's dissertation project at
+City College, University of York Europe Campus. When using this software for
+academic purposes, please cite:
+
+Vaitsopoulou, V. A. (2025). Bridging Research-Grade Models and Consumer 
+Wearables: A Personalized Federated Learning Approach to Stress Prediction. 
+Master's Dissertation, City College, University of York Europe Campus.
+
+THIRD-PARTY ACKNOWLEDGMENTS:
+This project uses the WESAD dataset, which should be cited separately:
+Schmidt, P., Reiss, A., Duerichen, R., Marberger, C., & Van Laerhoven, K. (2018).
+Introducing WESAD, a multimodal dataset for wearable stress and affect detection.
+In Proceedings of the 20th ACM International Conference on Multimodal Interaction 
+(ICMI '18).
+
