@@ -1,0 +1,36 @@
+# ==========================================
+# Core Machine Learning
+# ==========================================
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0,<2.0.0  # Pinned below 2.0 for stability
+pandas>=2.0.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
+
+# ==========================================
+# Biometric & Signal Processing (Critical for WESAD)
+# ==========================================
+neurokit2>=0.2.0  # Best for EDA/ECG processing
+heartpy>=1.2.7    # Heart rate analysis
+biosppy>=2.0.0    # Bio-signal processing
+h5py>=3.9.0       # For heavy sensor data storage
+
+# ==========================================
+# Visualization
+# ==========================================
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.16.0
+
+# ==========================================
+# Utilities
+# ==========================================
+tqdm>=4.65.0           # Progress bars
+python-dotenv>=1.0.0   # Environment variables
+pyyaml>=6.0            # Config files
+click>=8.1.0           # CLI interface
+loguru>=0.7.0          # Better logging
+
+# Note: Dev/Demo dependencies are managed in pyproject.toml
+# to keep this file lightweight for production deployment.
