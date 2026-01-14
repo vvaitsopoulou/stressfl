@@ -1,0 +1,76 @@
+# EditorConfig is awesome: https://EditorConfig.org
+
+# Top-most EditorConfig file
+root = true
+
+# Unix-style newlines with a newline ending every file
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Python files
+[*.py]
+indent_style = space
+indent_size = 4
+max_line_length = 88  # Aligned with Black
+
+# YAML files
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# JSON files
+[*.json]
+indent_style = space
+indent_size = 2
+
+# TOML files (PyProject.toml)
+[*.toml]
+indent_style = space
+indent_size = 4
+
+# Markdown files
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = 0   # 0 = off. Prevents broken links/tables.
+
+# reStructuredText files
+[*.rst]
+indent_style = space
+indent_size = 4       # standard Sphinx/Docutils default
+max_line_length = 80
+
+# Web standards (For Demo App frontend components)
+[*.{html,htm,css,js,jsx,ts,tsx,vue}]
+indent_style = space
+indent_size = 2
+
+# Shell scripts
+[*.{sh,bash}]
+indent_style = space
+indent_size = 2
+
+# Jupyter notebooks
+[*.ipynb]
+indent_style = space
+indent_size = 4
+
+# Configuration files
+[*.{cfg,conf,ini}]
+indent_style = space
+indent_size = 4
+
+# Makefiles 
+[Makefile]
+indent_style = tab
+
+# Windows batch files
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
+
+# GitHub Actions workflow files
+[.github/workflows/*.{yml,yaml}]
+indent_style = space
+indent_size = 2
