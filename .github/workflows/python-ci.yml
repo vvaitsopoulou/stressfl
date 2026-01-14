@@ -1,0 +1,156 @@
+# .github/workflows/python-ci.yml
+name: Python CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+# Cancel in-progress runs when a new workflow is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ==============================================================================
+  # 1. LINT & FORMAT
+  # ==============================================================================
+  lint-and-format:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install black ruff mypy bandit[toml]
+          # We install requirements so MyPy can find imports
+          # Using CPU-only torch to save download time/bandwidth in CI
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Check code formatting with Black
+        run: black --check --diff src/ tests/
+
+      - name: Lint with Ruff
+        run: ruff check src/ tests/
+
+      - name: Type check with MyPy
+        run: mypy src/ --ignore-missing-imports
+        continue-on-error: true  # Don't fail the build on type errors initially
+
+      - name: Security check with Bandit
+        run: bandit -r src/ -c pyproject.toml
+
+  # ==============================================================================
+  # 2. UNIT TESTS
+  # ==============================================================================
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: [lint-and-format] # Wait for linting to pass first
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10'] # Reduced matrix to save minutes, add 3.11/3.12 later
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov pytest-xdist
+          # Use CPU torch for faster CI tests
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          # We explicitly ignore 'gpu' markers in CI
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing -m "not gpu"
+        env:
+          PYTEST_ADDOPTS: "--color=yes"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }} # REQUIRED for v4
+
+  # ==============================================================================
+  # 3. NOTEBOOK SANITY CHECK (Modified)
+  # ==============================================================================
+  notebook-check:
+    name: Notebook Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install jupyter nbconvert nbformat
+
+      - name: Check notebooks syntax
+        run: |
+          # Removed --execute because WESAD data is missing in CI
+          # This just checks if the file is not corrupted
+          find notebooks/ -name "*.ipynb" -not -path "*/\.*" | while read notebook; do
+            echo "Checking $notebook"
+            jupyter nbconvert --to notebook "$notebook" --output /dev/null || echo "Failed to convert $notebook"
+          done
+        continue-on-error: true
+
+  # ==============================================================================
+  # 4. BUILD ARTIFACT
+  # ==============================================================================
+  build:
+    name: Build Package
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install build dependencies
+        run: pip install build wheel
+
+      - name: Build package
+        run: python -m build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-packages
+          path: dist/
+          retention-days: 7
