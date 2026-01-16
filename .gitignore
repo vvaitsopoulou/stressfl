@@ -48,20 +48,20 @@ venv.bak/
 *.iws
 .idea_modules/
 
-# Ruff 
+# Ruff
 .ruff_cache/
 
-# Abstra 
+# Abstra
 .abstra/
 
-# DATASETS & SENSITIVE DATA 
+# DATASETS & SENSITIVE DATA
 
 # General Data Folders
 data/
 !data/.gitkeep
 datasets/
 
-# WESAD Specifics 
+# WESAD Specifics
 data/raw/wesad/
 data/raw/WESAD/
 wesad_data/
@@ -106,7 +106,7 @@ saved_models/
 *.onnx
 *.pb
 
-# PyInstaller 
+# PyInstaller
 *.manifest
 *.spec
 

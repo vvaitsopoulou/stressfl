@@ -4,65 +4,65 @@ updates:
   # ==========================================
   # Python Dependencies
   # ==========================================
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-    open-pull-requests-limit: 10
+- package-ecosystem: pip
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+    time: 09:00
+  open-pull-requests-limit: 10
     # reviewers:
-    #   - "vasiliki-anna"   
-    labels:
-      - "dependencies"
-      - "python"
-    commit-message:
-      prefix: "deps"
-      prefix-development: "deps-dev"
-      include: "scope"
+    #   - "vasiliki-anna"
+  labels:
+  - dependencies
+  - python
+  commit-message:
+    prefix: deps
+    prefix-development: deps-dev
+    include: scope
 
     # Group updates to reduce PR noise
-    groups:
-      pytorch:
-        patterns:
-          - "torch"
-          - "torchvision"
-          - "torchaudio"
-      data-science:
-        patterns:
-          - "numpy"
-          - "pandas"
-          - "scikit-learn"
-          - "scipy"
-      visualization:
-        patterns:
-          - "matplotlib"
-          - "seaborn"
-          - "plotly"
-      development:
-        dependency-type: "development"
+  groups:
+    pytorch:
+      patterns:
+      - torch
+      - torchvision
+      - torchaudio
+    data-science:
+      patterns:
+      - numpy
+      - pandas
+      - scikit-learn
+      - scipy
+    visualization:
+      patterns:
+      - matplotlib
+      - seaborn
+      - plotly
+    development:
+      dependency-type: development
 
     # Ignore major version bumps for stable dependencies (Safety net)
-    ignore:
-      - dependency-name: "numpy"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "pandas"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "scikit-learn"
-        update-types: ["version-update:semver-major"]
+  ignore:
+  - dependency-name: numpy
+    update-types: [version-update:semver-major]
+  - dependency-name: pandas
+    update-types: [version-update:semver-major]
+  - dependency-name: scikit-learn
+    update-types: [version-update:semver-major]
 
   # ==========================================
   # GitHub Actions
   # ==========================================
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "ci"
-    commit-message:
-      prefix: "ci"
-      include: "scope"
+- package-ecosystem: github-actions
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  labels:
+  - dependencies
+  - ci
+  commit-message:
+    prefix: ci
+    include: scope

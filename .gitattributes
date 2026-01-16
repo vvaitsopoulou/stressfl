@@ -36,7 +36,7 @@
 
 # Treat as text for diffs, but exclude from language stats
 *.ipynb text eol=lf linguist-documentation
-# Set a specific diff driver 
+# Set a specific diff driver
 *.ipynb diff=jupyternotebook
 
 
@@ -103,7 +103,7 @@ docs/* linguist-documentation
 assets/* linguist-vendored
 
 # GIT LFS (Large File Storage)
-# recommended for a PyTorch project 
+# recommended for a PyTorch project
  *.pth filter=lfs diff=lfs merge=lfs -text
  *.pt filter=lfs diff=lfs merge=lfs -text
  *.ckpt filter=lfs diff=lfs merge=lfs -text
