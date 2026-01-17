@@ -57,7 +57,7 @@ venv.bak/
 # DATASETS & SENSITIVE DATA
 
 # General Data Folders
-data/
+/data/
 !data/.gitkeep
 datasets/
 
