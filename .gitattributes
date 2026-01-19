@@ -1,13 +1,17 @@
 # Auto detect text files and perform LF normalization
-* text=auto
+* text=auto eol=lf
 
-# Source code - Enforce LF (Unix style) for consistency across OS
+# ============================================================================
+# SOURCE CODE (Enforce LF)
+# ============================================================================
 *.py text eol=lf
 *.pyx text eol=lf
 *.pxd text eol=lf
 *.pxi text eol=lf
 
-# Configuration files
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 *.yaml text eol=lf
 *.yml text eol=lf
 *.json text eol=lf
@@ -16,37 +20,39 @@
 *.cfg text eol=lf
 *.conf text eol=lf
 
-# Documentation
+# ============================================================================
+# DOCUMENTATION
+# ============================================================================
 *.md text eol=lf
 *.txt text eol=lf
 *.rst text eol=lf
 *.tex text eol=lf
 
-# Scripts
+# ============================================================================
+# SCRIPTS
+# ============================================================================
 *.sh text eol=lf
 *.bash text eol=lf
 
-# Windows scripts - Keep CRLF
+# Windows scripts - Keep CRLF to ensure they run on Windows
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 
-
+# ============================================================================
 # JUPYTER NOTEBOOKS
-
+# ============================================================================
 # Treat as text for diffs, but exclude from language stats
 *.ipynb text eol=lf linguist-documentation
-# Set a specific diff driver
+# Set a specific diff driver (requires nbdime or similar config)
 *.ipynb diff=jupyternotebook
 
-
+# ============================================================================
 # DATA & BINARY FILES
-
+# ============================================================================
 # Standard Data - mark as binary to prevent git diff garbage
 *.csv binary
 *.tsv binary
-*.pkl binary
-*.pickle binary
 *.npy binary
 *.npz binary
 *.h5 binary
@@ -58,15 +64,6 @@
 *.edf binary
 *.xdf binary
 *.dat binary
-
-# Model files - binary
-*.pth binary
-*.pt binary
-*.ckpt binary
-*.safetensors binary
-*.onnx binary
-*.pb binary
-*.tflite binary
 
 # Media
 *.jpg binary
@@ -95,17 +92,25 @@
 *.xls binary
 *.xlsx binary
 
+# ============================================================================
 # GITHUB STATS (LINGUIST)
-
+# ============================================================================
 # Exclude data and docs from repo language stats
 data/* linguist-vendored
 docs/* linguist-documentation
 assets/* linguist-vendored
 
+# ============================================================================
 # GIT LFS (Large File Storage)
-# recommended for a PyTorch project
- *.pth filter=lfs diff=lfs merge=lfs -text
- *.pt filter=lfs diff=lfs merge=lfs -text
- *.ckpt filter=lfs diff=lfs merge=lfs -text
- *.pkl filter=lfs diff=lfs merge=lfs -text
- *.onnx filter=lfs diff=lfs merge=lfs -text
+# ============================================================================
+# Note: I removed these from the "Binary" section above to avoid conflicts.
+# These specific attributes ensure LFS handles the storage and diffing.
+*.pth filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text
+*.ckpt filter=lfs diff=lfs merge=lfs -text
+*.pkl filter=lfs diff=lfs merge=lfs -text
+*.pickle filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.safetensors filter=lfs diff=lfs merge=lfs -text
+*.pb filter=lfs diff=lfs merge=lfs -text
+*.tflite filter=lfs diff=lfs merge=lfs -text

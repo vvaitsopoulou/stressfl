@@ -309,7 +309,7 @@ class WESADResampleMerge:
                 result = self.pkl_to_np_wrist(file_path, subject_id)
 
                 if result is not None:
-                    (sid, wrist_acc, wrist_bvp, wrist_eda, wrist_temp, label) = result
+                    sid, wrist_acc, wrist_bvp, wrist_eda, wrist_temp, label = result
 
                     combined_subj = np.hstack(
                         (sid, wrist_acc, wrist_bvp, wrist_eda, wrist_temp, label)
