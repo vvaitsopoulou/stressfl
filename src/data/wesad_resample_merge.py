@@ -40,45 +40,48 @@ class WESADResampleMerge:
         self._metadata = None
         self._sampling_rates = None
         self._columns = None
+        self._chest_columns = None
+        self._wrist_columns = None
+        self._all_columns = None
 
     # use lazy loading pattern @property to save time and memory
     # get metadata from first subject file
     @property
     def metadata(self):
         if self._metadata is None:
-            self._extract_metadata()
+            self._load_metadata()
         return self._metadata
 
     @property
     def sampling_rates(self):
         if self._sampling_rates is None:
-            self._extract_metadata()
+            self._load_metadata()
         return self._sampling_rates
 
     # Dynamically generated chest columns
     @property
     def CHEST_COLUMNS(self):
         if self._chest_columns is None:
-            self._extract_metadata()
+            self._load_metadata()
         return self._chest_columns
 
     @property
     def WRIST_COLUMNS(self):
         if self._wrist_columns is None:
-            self._extract_metadata()
+            self._load_metadata()
         return self._wrist_columns
 
     # Dynamically generated all columns
     @property
     def ALL_COLUMNS(self):
         if self._all_columns is None:
-            self._extract_metadata()
+            self._load_metadata()
         return self._all_columns
 
     # Chest sampling frequency
     @property
     def SF_CHEST(self):
-        return self.sampling_rates["chest_base"]
+        return self.sampling_rates["chest"]
 
     # BVP sampling frequency
     @property
@@ -86,6 +89,7 @@ class WESADResampleMerge:
         return self.sampling_rates["wrist"]["BVP"]
 
     # EDA sampling frequency
+    @property
     def SF_EDA(self):
         return self.sampling_rates["wrist"]["EDA"]
 
@@ -139,6 +143,10 @@ class WESADResampleMerge:
 
         # Get column names
         self._columns = get_column_names_from_data(first_subject_path)
+
+        self._chest_columns = self._columns["chest"]
+        self._wrist_columns = self._columns["wrist"]
+        self._all_columns = self._columns
 
         # Print summary
         print(f"Chest sampling rate: {self.SF_CHEST} Hz")
@@ -334,8 +342,7 @@ class WESADResampleMerge:
         print(f"Total samples: {len(final_data):,}")
         print(f"Saved to: {output_path}")
 
-    #  Keep only labels 1 (baseline), 2 (stress), 3 (amusement)
-    #  Remove invalid temperature readings (temp <= 0)
+    # Interpolate to "fix" invalid temperature readings (temp <= 0)
     def filter_chest_data(self):
         input_path = os.path.join(self.raw_path, "merged_chest_temp.pkl")
         df = pd.read_pickle(input_path)
@@ -343,34 +350,41 @@ class WESADResampleMerge:
         initial_count = len(df)
         print(f"Initial samples: {initial_count:,}")
 
-        # Filter by label
-        df_fltr = df[df["label"].isin([1, 2, 3])]
-        after_label_filter = len(df_fltr)
-        print(
-            f"After label filter: {after_label_filter:,} "
-            f"(removed {initial_count - after_label_filter:,})"
-        )
+        # LABELS: Do NOTHING yet. Initially we filtered amusement and meditation out but - see my notes - to avoid frankenstein windows we dont
+        # We keep 0, 4, 5, 6, 7 so the timeline remains continuous.
+        # We will drop the bad windows in Phase 2.
 
-        # Filter by temperature
-        df_fltr = df_fltr[df_fltr["temp"] > 0]
-        final_count = len(df_fltr)
-        print(
-            f"After temp filter: {final_count:,} "
-            f"(removed {after_label_filter - final_count:,})"
-        )
+        # TEMPERATURE: Impute (Interpolate)
+        temp_col = "c_temp" if "c_temp" in df.columns else "temp"
 
-        # Save filtered data
+        if temp_col in df.columns:
+            # Count artifacts (0 or less)
+            zeros = (df[temp_col] <= 0).sum()
+            print(f"Found {zeros:,} artifact samples (Temp <= 0) to fix.")
+
+            if zeros > 0:
+                # Replace 0 with NaN (Empty)
+                df[temp_col] = df[temp_col].replace(0, np.nan)
+
+                # Interpolate (Fill NaN with a straight line between neighbors)
+                df[temp_col] = df[temp_col].interpolate(
+                    method="linear", limit_direction="both"
+                )
+
+                print(f"Interpolated {zeros:,} samples. Timeline is preserved.")
+        else:
+            print("Warning: Temperature column not found.")
+
+        # Save the continuous, cleaned file
         output_path = os.path.join(self.raw_path, "merged_chest.pkl")
-        df_fltr.to_pickle(output_path)
+        df.to_pickle(output_path)
 
-        # Remove temporary file
-        os.remove(input_path)
+        # Cleanup
+        if os.path.exists(input_path):
+            os.remove(input_path)
 
-        print(f"Saved filtered data to: {output_path}")
-        print(
-            f"Total removed: {initial_count - final_count:,} samples "
-            f"({100 * (initial_count - final_count) / initial_count:.1f}%)"
-        )
+        print(f"Saved cleaned data to: {output_path}")
+        print(f"Total samples: {len(df):,} (No rows dropped)")
 
     def resample_merge(self):
         print("Starting preprocessing...")
@@ -383,7 +397,7 @@ class WESADResampleMerge:
 
         self.merge_wrist_data()
         self.merge_chest_data()
-        self.filter_chest_data()
+        # self.filter_chest_data() COMMENT OUT BECAUSE TEMPORAL INCONSISTENCIES. TODO move filtering to the windowing stage instead
 
         print("\n" + "=" * 70)
         print("Successfully loaded merged and filtered chest and wrist data!")
