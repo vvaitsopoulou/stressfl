@@ -397,7 +397,7 @@ class WESADResampleMerge:
 
         self.merge_wrist_data()
         self.merge_chest_data()
-        # self.filter_chest_data() COMMENT OUT BECAUSE TEMPORAL INCONSISTENCIES. TODO move filtering to the windowing stage instead
+        self.filter_chest_data()  # TEMPORAL INCONSISTENCIES. TODO move filtering to the windowing stage instead
 
         print("\n" + "=" * 70)
         print("Successfully loaded merged and filtered chest and wrist data!")
