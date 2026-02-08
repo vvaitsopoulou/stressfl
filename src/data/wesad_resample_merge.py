@@ -363,8 +363,8 @@ class WESADResampleMerge:
             print(f"Found {zeros:,} artifact samples (Temp <= 0) to fix.")
 
             if zeros > 0:
-                # Replace 0 with NaN (Empty)
-                df[temp_col] = df[temp_col].replace(0, np.nan)
+                # Replace <= 0 with NaN (Empty)
+                df.loc[df[temp_col] <= 0, temp_col] = np.nan
 
                 # Interpolate (Fill NaN with a straight line between neighbors)
                 df[temp_col] = df[temp_col].interpolate(
@@ -372,6 +372,22 @@ class WESADResampleMerge:
                 )
 
                 print(f"Interpolated {zeros:,} samples. Timeline is preserved.")
+
+                # Debug: verify immediately after interpolation
+                bad = (df[temp_col] <= 0).sum()
+                print("Post-interpolation bad count:", bad)
+                if bad:
+                    idx = df.index[df[temp_col] <= 0][:10]
+                    print("Example bad values:", df.loc[idx, temp_col].tolist())
+                    # show neighbors to see why interpolation ended at 0/-0.0
+                    for i in idx[:3]:
+                        print(
+                            i,
+                            "prev/cur/next:",
+                            df.loc[i - 1, temp_col] if i - 1 in df.index else None,
+                            df.loc[i, temp_col],
+                            df.loc[i + 1, temp_col] if i + 1 in df.index else None,
+                        )
         else:
             print("Warning: Temperature column not found.")
 
@@ -400,7 +416,7 @@ class WESADResampleMerge:
             print(f"Found {zeros:,} wrist temp artifacts (Temp <= 0) to fix.")
 
             if zeros > 0:
-                df[temp_col] = df[temp_col].replace(0, np.nan)
+                df.loc[df[temp_col] <= 0, temp_col] = np.nan
                 df[temp_col] = df[temp_col].interpolate(
                     method="linear", limit_direction="both"
                 )
