@@ -25,6 +25,7 @@ repos:
   - id: check-case-conflict
   - id: mixed-line-ending
     args: [--fix=lf]
+    files: \.(py|md|yaml|yml|toml|json|txt)$
   - id: detect-private-key
   - id: check-ast
   - id: debug-statements

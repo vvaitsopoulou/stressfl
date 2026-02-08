@@ -42,7 +42,7 @@ def extract_wesad_metadata(pickle_path):
 
 
 # we have to use the base frequency of 700Hz as provided in the dataset readme (label frequency)
-# otherwise only relative frequency may be calculated
+# otherwise only relative frequency may be calculated (by using chest as the base)
 def infer_sampling_rates(metadata):
     label_length = metadata["label_length"]
 
@@ -157,10 +157,6 @@ def get_column_names_from_data(pickle_path):
 #     # Example subject 2
 #     example_path = 'data/raw/wesad/WESAD/S2/S2.pkl'
 
-#     print("=" * 60)
-#     print("WESAD Metadata Extraction Example")
-#     print("=" * 60)
-
 #     # Extract metadata
 #     print("\n1. Extracting metadata...")
 #     metadata = extract_wesad_metadata(example_path)
@@ -184,7 +180,3 @@ def get_column_names_from_data(pickle_path):
 #     columns = get_column_names_from_data(example_path)
 #     print(f"   Chest columns: {columns['chest']}")
 #     print(f"   Wrist columns: {columns['wrist']}")
-
-#     print("\n" + "=" * 60)
-#     print("These values can be used instead of hardcoding!")
-#     print("=" * 60)
