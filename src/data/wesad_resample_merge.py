@@ -386,6 +386,29 @@ class WESADResampleMerge:
         print(f"Saved cleaned data to: {output_path}")
         print(f"Total samples: {len(df):,} (No rows dropped)")
 
+    def filter_wrist_data(self):
+        input_path = os.path.join(self.raw_path, "merged_wrist.pkl")
+        df = pd.read_pickle(input_path)
+
+        print(f"Initial wrist samples: {len(df):,}")
+
+        # TEMPERATURE: Impute (Interpolate)
+        temp_col = "w_temp"
+
+        if temp_col in df.columns:
+            zeros = (df[temp_col] <= 0).sum()
+            print(f"Found {zeros:,} wrist temp artifacts (Temp <= 0) to fix.")
+
+            if zeros > 0:
+                df[temp_col] = df[temp_col].replace(0, np.nan)
+                df[temp_col] = df[temp_col].interpolate(
+                    method="linear", limit_direction="both"
+                )
+                print(f"Interpolated {zeros:,} wrist temp samples.")
+
+        df.to_pickle(input_path)
+        print(f"Saved cleaned wrist data. Total samples: {len(df):,}")
+
     def resample_merge(self):
         print("Starting preprocessing...")
         print(f"Dataset path: {self.dataset_path}")
@@ -398,6 +421,7 @@ class WESADResampleMerge:
         self.merge_wrist_data()
         self.merge_chest_data()
         self.filter_chest_data()  # TEMPORAL INCONSISTENCIES. TODO move filtering to the windowing stage instead
+        self.filter_wrist_data()
 
         print("\n" + "=" * 70)
         print("Successfully loaded merged and filtered chest and wrist data!")
