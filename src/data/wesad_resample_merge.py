@@ -422,6 +422,21 @@ class WESADResampleMerge:
                 )
                 print(f"Interpolated {zeros:,} wrist temp samples.")
 
+        # FIX WRIST EDA (Interpolate negative artifacts)
+        # This is physically impossible data (Conductance < 0)
+        count = (df["w_eda"] < 0).sum()
+        if count > 0:
+            print(f"Fixing {count} negative EDA artifacts via interpolation...")
+            # Replace negative values with NaN
+            df.loc[df["w_eda"] < 0, "w_eda"] = np.nan
+            # Fill NaNs with linear interpolation
+            df["w_eda"] = df["w_eda"].interpolate(
+                method="linear", limit_direction="both"
+            )
+            print(f"Interpolation Done. Interpolated {count} wrist eda samples.")
+        else:
+            print("No negative EDA values found.")
+
         df.to_pickle(input_path)
         print(f"Saved cleaned wrist data. Total samples: {len(df):,}")
 
