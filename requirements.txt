@@ -11,7 +11,7 @@ scipy>=1.11.0
 # ==========================================
 # Biometric & Signal Processing (Critical for WESAD)
 # ==========================================
-neurokit2>=0.2.0  # Best for EDA/ECG processing
+neurokit2>=0.2.7 # Best for EDA/ECG processing
 heartpy>=1.2.7    # Heart rate analysis
 biosppy>=2.0.0    # Bio-signal processing
 h5py>=3.9.0       # For heavy sensor data storage

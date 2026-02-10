@@ -46,7 +46,7 @@ dependencies = [
     "click>=8.1.0",
     "loguru>=0.7.0",
     # Added Biometric Libs
-    "neurokit2>=0.2.0",
+    "neurokit2>=0.2.7",
     "heartpy>=1.2.7",
     "biosppy>=2.0.0",
     "h5py>=3.9.0",
