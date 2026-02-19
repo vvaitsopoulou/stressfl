@@ -11,6 +11,8 @@ from .wesad_metadata_extractor import (
     LABEL_FREQ,  # Dataset constant
 )
 
+from .wesad_signal_preprocessing import SignalPreprocessor
+
 # Define what gets imported
 __all__ = [
     # Main class
