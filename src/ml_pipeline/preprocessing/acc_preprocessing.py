@@ -16,7 +16,7 @@
 # modyle beyond basic filtering, so manual filters are the standard.
 
 import numpy as np
-from scipy.signal import firwin, lfilter, savgol_filter
+from scipy.signal import filtfilt, firwin, savgol_filter
 
 
 class AccPreprocessing:
@@ -67,4 +67,4 @@ class AccPreprocessing:
         nyquist = self.fs / 2.0
         normalised_cutoff = self.fir_cutoff / nyquist
         coeffs = firwin(self.fir_length, normalised_cutoff)
-        return lfilter(coeffs, 1.0, signal)
+        return filtfilt(coeffs, 1.0, signal)
