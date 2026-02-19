@@ -1,0 +1,38 @@
+{
+    "sensors": {
+        "bvp": true,
+        "w_eda": true,
+        "w_temp": true,
+        "w_acc": true
+    },
+    "sampling rate": {
+        "bvp": 64,
+        "w_eda": 64,
+        "w_temp": 64,
+        "w_acc_x": 64,
+        "w_acc_y": 64,
+        "w_acc_z": 64
+    },
+    "subjects": {
+        "2.0": true,
+        "3.0": true,
+        "4.0": true,
+        "5.0": true,
+        "6.0": true,
+        "7.0": true,
+        "8.0": true,
+        "9.0": true,
+        "10.0": true,
+        "11.0": true,
+        "13.0": true,
+        "14.0": true,
+        "15.0": true,
+        "16.0": true,
+        "17.0": true
+    },
+    "labels": {
+        "1.0": true,
+        "2.0": true,
+        "3.0": true
+    }
+}
