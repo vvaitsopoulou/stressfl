@@ -1,0 +1,31 @@
+# TODO: THEORY BACKING JUSTIFICATION/ CHECK THE JSONS AGAIN MAKE SURE NAMES ARE CORRECT ALL IS CORRECT
+import json
+
+
+def get_max_sampling_rate(config_path):
+    with open(config_path) as f:
+        config = json.load(f)
+
+    sampling_rates = config["sampling rate"]
+    max_sampling_rate = max(sampling_rates.values())
+
+    return max_sampling_rate
+
+
+def get_active_key(config_path, key):  # recursive= False
+    with open(config_path) as f:
+        config = json.load(f)
+
+        # if recursive:
+        #     active_keys = []
+        #     for sub_key, sub_value in config.items():
+        #         if isinstance(sub_value, dict):
+        #             if key == sub_key:
+        #                 for feature in config[sub_key]:
+        #                     for sub_feature in config[sub_key][feature]:
+        #                         active_keys.append(sub_feature)
+        # else:
+        # Get all keys where the value is True
+        active_keys = [val for val, is_active in config[key].items() if is_active]
+
+    return active_keys
