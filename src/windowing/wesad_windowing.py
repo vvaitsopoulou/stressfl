@@ -140,7 +140,7 @@ class WESADWindowing:
 
         if (
             df is None
-        ):  # if we run ablations and this is called multiple times check if this has already been loaded in the attribute
+        ):  # if we run ablations and this is called multiple times check if df has already been loaded in the attribute
             if not hasattr(self, "df"):
                 self.load_data()
             df = self.df
@@ -172,33 +172,29 @@ class WESADWindowing:
                 pos = run_start
                 local_idx = 0
                 while pos + self.window_samples <= run_end:
-                    window_data = subject_data.iloc[
-                        pos : pos + self.window_samples
-                    ].copy()
 
-                    # Safety check: verify label purity (should always pass due to run-based approach)
-                    if window_data["label"].nunique() != 1:
+                    # Safety check (should always pass due to run-based approach)
+                    # Read labels only no full window copy to FIX MEMORY EXPLOSION
+                    window_labels = subject_data["label"].iloc[
+                        pos : pos + self.window_samples
+                    ]
+                    if window_labels.nunique() != 1:
                         rejected["mixed_label"] += 1
                         pos += self.slide_samples
                         continue
 
-                    # Determine if this is an overlapped window
                     # A window is "non-overlapped" if it starts at a multiple of window_samples
                     # relative to the run start
                     relative_pos = pos - run_start
                     is_overlapped = (relative_pos % self.window_samples) != 0
 
-                    # Extract ACC sub-windows
-                    acc_subwindows = self._extract_acc_subwindows(window_data)
-
                     window_info = {
-                        "data": window_data,
                         "sid": sid,
                         "label": label_val,
                         "window_idx": local_idx,
                         "start_sample": pos,
+                        "end_sample": pos + self.window_samples,
                         "is_overlapped": is_overlapped,
-                        "acc_subwindows": acc_subwindows,
                     }
 
                     windows.append(window_info)
@@ -206,10 +202,13 @@ class WESADWindowing:
                     subject_window_count += 1
                     pos += self.slide_samples
 
-            # Count tail samples that didn't fill a complete window
-            tail = run_end - pos
-            if 0 < tail < self.window_samples:
-                rejected["short"] += 1
+                # Count tail samples that didn't fill a complete window
+                # when we ecit the loop pos points to the next candidate start .
+                # The actual tail is from the last window's end to run_end.
+                last_window_end = pos - self.slide_samples + self.window_samples
+                tail = run_end - last_window_end
+                if 0 < tail < self.window_samples:
+                    rejected["short"] += 1
 
             print(f"  Subject {int(sid)}: {subject_window_count} windows")
 
@@ -259,16 +258,15 @@ class WESADWindowing:
 
         return runs
 
-    def _extract_acc_subwindows(self, window_data: pd.DataFrame) -> list[pd.DataFrame]:
-        # Split the ACC columns of a window into sub-windows.
-
-        # Per Schmidt 2018, ACC features are extracted on 5s sub-windows
-        # and then aggregated (mean/std) for the full 60s window.
-        acc_cols_present = [c for c in self._acc_cols if c in window_data.columns]
+    def extract_acc_subwindows(self, window_df: pd.DataFrame) -> list[pd.DataFrame]:
+        # Extract ACC sub-windows from a single window DataFrame.
+        # Called by the feature extractor per window.
+        # Per Schmidt 2018, ACC features use 5s sub-windows aggregated over 60s.
+        acc_cols_present = [c for c in self._acc_cols if c in window_df.columns]
         if not acc_cols_present:
             return []
 
-        acc_data = window_data[acc_cols_present].reset_index(drop=True)
+        acc_data = window_df[acc_cols_present].reset_index(drop=True)
         n_samples = len(acc_data)
         subwindows = []
 
@@ -276,7 +274,7 @@ class WESADWindowing:
         while pos + self.acc_subwindow_samples <= n_samples:
             sub = acc_data.iloc[pos : pos + self.acc_subwindow_samples].copy()
             subwindows.append(sub)
-            pos += self.acc_subwindow_samples  # non-overlapping sub-windows
+            pos += self.acc_subwindow_samples
 
         return subwindows
 
@@ -310,8 +308,8 @@ class WESADWindowing:
                     "label": w["label"],
                     "window_idx": w["window_idx"],
                     "start_sample": w["start_sample"],
+                    "end_sample": w["end_sample"],
                     "is_overlapped": w["is_overlapped"],
-                    "n_acc_subwindows": len(w["acc_subwindows"]),
                 }
                 for w in windows
             ]
@@ -324,6 +322,15 @@ class WESADWindowing:
         print(f"Saved metadata → {meta_path}")
 
         return windows_path, meta_path
+
+    def get_window_df(self, window: dict) -> pd.DataFrame:
+        # Reconstruct the raw DataFrame slice for a single window.
+        # The DataFrame must already be loaded (load_data())
+        if not hasattr(self, "df"):
+            raise RuntimeError("Data not loaded. Call load_data() first.")
+
+        subject_df = self.df[self.df["sid"] == window["sid"]].reset_index(drop=True)
+        return subject_df.iloc[window["start_sample"] : window["end_sample"]]
 
     # changed to solve mutable default argument (ruff B006)
     def run_ablation(
