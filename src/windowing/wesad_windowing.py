@@ -30,6 +30,7 @@
 # Reference:
 #   Schmidt, P. et al. (2018). Introducing WESAD, a Multimodal Dataset for Wearable Stress and Affect Detection. ICMI '18.
 
+import json
 import os
 import pickle
 
@@ -77,9 +78,6 @@ class WESADWindowing:
         self.slide_sec = slide_sec
         self.acc_subwindow_sec = acc_subwindow_sec
         self.wrist = wrist
-
-        # Load config
-        import json
 
         with open(config_path) as f:
             self._config = json.load(f)
@@ -167,6 +165,7 @@ class WESADWindowing:
             for label_val, run_start, run_end in label_runs:
                 # Check if this label is active
                 if str(float(label_val)) not in self.active_labels:
+                    rejected["inactive_label"] += run_end - run_start
                     continue
 
                 # Slide through this contiguous label run
@@ -206,6 +205,11 @@ class WESADWindowing:
                     local_idx += 1
                     subject_window_count += 1
                     pos += self.slide_samples
+
+            # Count tail samples that didn't fill a complete window
+            tail = run_end - pos
+            if 0 < tail < self.window_samples:
+                rejected["short"] += 1
 
             print(f"  Subject {int(sid)}: {subject_window_count} windows")
 
