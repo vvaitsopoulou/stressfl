@@ -346,6 +346,10 @@ class WESADWindowing:
 
         results = {}
 
+        # Save original slide settings to restore after ablation
+        original_slide_sec = self.slide_sec
+        original_slide_samples = self.slide_samples
+
         for slide in slide_values:
             tag = "no_overlap" if slide >= self.window_size_sec else f"slide_{slide}s"
             print(f"\nAblation: slide = {slide}s ({tag})\n")
@@ -357,6 +361,10 @@ class WESADWindowing:
             windows = self.segment(df)
             self.save_windows(windows, tag=tag)
             results[slide] = windows
+
+        # Restore original slide settings
+        self.slide_sec = original_slide_sec
+        self.slide_samples = original_slide_samples
 
         return results
 
