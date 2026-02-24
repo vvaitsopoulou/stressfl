@@ -835,7 +835,7 @@ def normalize_per_subject(
         if len(baseline_data) == 0:
             print(
                 f"  Warning: Subject {sid} has no baseline windows. "
-                f"Falling back to global min-max for this subject."
+                f"Falling back to overall subject min-max."
             )
             baseline_data = group[feature_cols]
 
