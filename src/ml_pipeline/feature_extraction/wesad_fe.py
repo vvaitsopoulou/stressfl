@@ -974,7 +974,9 @@ def run_feature_pipeline(
         df_features = impute_features(df_features, strategy=impute_strategy)
 
     #  Save
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    save_dir = os.path.dirname(output_path)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir)
     df_features.to_pickle(output_path)
     print(f"\nSaved feature matrix → {output_path}")
     print(f"  Shape: {df_features.shape}")
