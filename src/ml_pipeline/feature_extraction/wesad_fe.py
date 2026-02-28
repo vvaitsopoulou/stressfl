@@ -36,6 +36,7 @@
 
 import json
 import os
+import pickle
 import time
 import traceback
 import warnings
@@ -653,22 +654,72 @@ class WESADFeatureExtractor:
         subject_df = self._subject_dfs[window["sid"]]
         return subject_df.iloc[window["start_sample"] : window["end_sample"]]
 
-    def extract_all(self) -> pd.DataFrame:
-        # Extract features from all windows.
+    def extract_all(
+        self, checkpoint_path: str | None = None, checkpoint_every: int = 1000
+    ) -> pd.DataFrame:
+        # Extract features from all windows with periodic checkpointing.
+        #
+        # KEY DESIGN: each checkpoint batch is flushed to a numbered chunk file on
+        # disk rather than accumulated in RAM. This prevents memory exhaustion on large
+        # runs (e.g. 121k windows at 0.25s slide). Peak RAM usage is ~checkpoint_every
+        # rows at a time rather than the full dataset.
+        #
+        # Checkpoint file layout (co-located with checkpoint_path):
+        #   <checkpoint_path>           — metadata: next_idx, failed, chunk_paths
+        #   <checkpoint_path>.chunk_0   — first batch as a pickled DataFrame
+        #   <checkpoint_path>.chunk_1   — second batch, etc.
+        #
+        # Parameters
+        # checkpoint_path : str, optional
+        #     Path for checkpoint metadata file. If provided and the file exists,
+        #     resumes from the last saved state. If None, runs fully in-memory
+        #     (original behaviour, fine for small window counts).
+        # checkpoint_every : int
+        #     Flush a chunk and update metadata every N windows (default: 1000).
+        #
         # Returns:
         # pd.DataFrame
         #     One row per window, columns are feature names plus metadata
         #     (sid, label, window_idx, is_overlapped).
+
         total = len(self.windows)
-        all_features = []
+        current_batch: list[dict] = []  # holds only ONE chunk at a time
         failed = 0
+        start_idx = 0
+        chunk_paths: list[str] = []  # paths to already-flushed chunk files on disk
+
+        def flush_chunk(path: str, batch: list[dict], chunk_idx: int) -> str:
+            chunk_file = f"{path}.chunk_{chunk_idx}"
+            pd.DataFrame(batch).to_pickle(chunk_file)
+            return chunk_file
+
+        def save_meta(path: str, next_idx: int) -> None:
+            meta = {"failed": failed, "next_idx": next_idx, "chunk_paths": chunk_paths}
+            with open(path, "wb") as fh:
+                pickle.dump(meta, fh)
+
+        # Resume from checkpoint if available
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            with open(checkpoint_path, "rb") as fh:
+                ckpt_meta = pickle.load(fh)
+            failed = ckpt_meta["failed"]
+            start_idx = ckpt_meta["next_idx"]
+            chunk_paths = ckpt_meta["chunk_paths"]
+            already_done = sum(
+                len(pd.read_pickle(p)) for p in chunk_paths if os.path.exists(p)
+            )
+            print(
+                f"  ▶ Resuming from checkpoint: {start_idx}/{total} windows done "
+                f"({already_done} rows in {len(chunk_paths)} chunks, {failed} failed)"
+            )
+
         start_time = time.time()
 
         # Suppress expected NeuroKit2 and numerical warnings during batch extraction.
-        # suppression is appropriate here because the warnings are expected, documented, handled at the extractor level, and the alternative
-        # is unreadable output during a run that may take hours. The key is that suppression is scoped and category-specific rather than a blanket global silencer.
-        # NK2 emits peak detection and convergence warnings on almost every window by design, which are already handled in each extractor via try/except.
-        # warnings re restored automatically when the with block exits.
+        # Suppression is appropriate here: warnings are expected, documented, and handled
+        # at the extractor level via try/except. NK2 emits peak-detection and convergence
+        # warnings on almost every window by design. Warnings are restored when the
+        # with-block exits.
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore", category=RuntimeWarning
@@ -677,14 +728,18 @@ class WESADFeatureExtractor:
                 "ignore", category=UserWarning
             )  # NeuroKit2 peak detection warnings
 
-            for i, window in enumerate(self.windows):
-                if i > 0 and i % 100 == 0:
+            for i in range(start_idx, total):
+                window = self.windows[i]
+
+                if i > start_idx and (i - start_idx) % 100 == 0:
                     elapsed = time.time() - start_time
-                    rate = i / elapsed
+                    done_this_run = i - start_idx
+                    rate = done_this_run / max(elapsed, 1e-9)
                     eta = (total - i) / rate
                     print(
-                        f"  [{i}/{total}] {rate:.1f} windows/sec, "
-                        f"ETA: {eta / 60:.1f} min, failed: {failed}"
+                        f"  [{i}/{total}] {rate:.1f} win/sec  "
+                        f"ETA: {eta / 60:.1f} min  failed: {failed}  "
+                        f"chunks on disk: {len(chunk_paths)}"
                     )
 
                 try:
@@ -694,26 +749,60 @@ class WESADFeatureExtractor:
                         feats["label"] = window["label"]
                         feats["window_idx"] = window["window_idx"]
                         feats["is_overlapped"] = window["is_overlapped"]
-                        all_features.append(feats)
+                        current_batch.append(feats)
                     else:
                         failed += 1
                 except Exception as e:
                     failed += 1
-                    if i < 5:
+                    if failed <= 5:
                         print(f"  Error on window {i} (S{window['sid']}): {e}")
                         traceback.print_exc()
 
-        elapsed = time.time() - start_time
-        print("\nFeature extraction complete:")
-        print(f"  Processed: {total - failed}/{total} windows ({failed} failed)")
-        print(f"  Time: {elapsed:.1f}s ({total / max(elapsed, 1):.1f} windows/sec)")
+                # Periodic flush to disk
+                if (
+                    checkpoint_path
+                    and (i + 1) % checkpoint_every == 0
+                    and current_batch
+                ):
+                    chunk_file = flush_chunk(
+                        checkpoint_path, current_batch, len(chunk_paths)
+                    )
+                    chunk_paths.append(chunk_file)
+                    save_meta(checkpoint_path, i + 1)
+                    print(
+                        f"  💾 Chunk {len(chunk_paths)} saved "
+                        f"({len(current_batch)} rows → ...chunk_{len(chunk_paths) - 1})"
+                    )
+                    current_batch = []  # release memory — this is the key fix
 
-        if not all_features:
+            # Flush any remaining rows in the final partial batch
+            if checkpoint_path and current_batch:
+                chunk_file = flush_chunk(
+                    checkpoint_path, current_batch, len(chunk_paths)
+                )
+                chunk_paths.append(chunk_file)
+                save_meta(checkpoint_path, total)
+                current_batch = []
+
+        elapsed = time.time() - start_time
+
+        # Concat all chunks from disk (or fall back to in-memory if no checkpointing)
+        if chunk_paths:
+            print(f"\nConcatenating {len(chunk_paths)} chunk files from disk...")
+            df_features = pd.concat(
+                [pd.read_pickle(p) for p in chunk_paths if os.path.exists(p)],
+                ignore_index=True,
+            )
+        elif current_batch:
+            df_features = pd.DataFrame(current_batch)
+        else:
             raise ValueError("No features extracted from any window!")
 
-        df_features = pd.DataFrame(all_features)
         df_features.replace([np.inf, -np.inf], np.nan, inplace=True)
 
+        print("\nFeature extraction complete:")
+        print(f"  Processed: {len(df_features)}/{total} windows ({failed} failed)")
+        print(f"  Time: {elapsed:.1f}s ({total / max(elapsed, 1):.1f} windows/sec)")
         print(f"  Feature matrix shape: {df_features.shape}")
         print(f"  NaN count: {df_features.isna().sum().sum()}")
 
@@ -925,6 +1014,8 @@ def run_feature_pipeline(
     normalize: bool = True,
     impute: bool = True,
     impute_strategy: str = "median",
+    checkpoint_path: str | None = None,
+    checkpoint_every: int = 1000,
 ) -> pd.DataFrame:
     # Run the full feature extraction → normalization → imputation pipeline.
 
@@ -947,11 +1038,19 @@ def run_feature_pipeline(
     #     Whether to impute NaN values.
     # impute_strategy : str
     #     Imputation method ("median" or "zero").
+    # checkpoint_path : str, optional
+    #     Path for extraction checkpoint file. Enables resume on crash.
+    # checkpoint_every : int
+    #     Save checkpoint every N windows (default: 1000).
 
     # Returns
     # pd.DataFrame
     #     Final feature matrix, saved to output_path.
     print("WESAD Feature Extraction Pipeline")
+
+    # Auto-generate checkpoint path from output_path if not specified
+    if checkpoint_path is None:
+        checkpoint_path = output_path.replace(".pkl", "_checkpoint.pkl")
 
     # Feature extraction
     extractor = WESADFeatureExtractor(
@@ -961,7 +1060,10 @@ def run_feature_pipeline(
         wrist=wrist,
         baseline_label=baseline_label,
     )
-    df_features = extractor.extract_all()
+    df_features = extractor.extract_all(
+        checkpoint_path=checkpoint_path,
+        checkpoint_every=checkpoint_every,
+    )
 
     # Normalization (per-subject, baseline-referenced)
     if normalize:
@@ -974,13 +1076,25 @@ def run_feature_pipeline(
         df_features = impute_features(df_features, strategy=impute_strategy)
 
     #  Save
-    save_dir = os.path.dirname(output_path)
-    if save_dir and not os.path.exists(save_dir):
-        os.makedirs(save_dir)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df_features.to_pickle(output_path)
     print(f"\nSaved feature matrix → {output_path}")
     print(f"  Shape: {df_features.shape}")
     print(f"  Columns: {list(df_features.columns)}")
+
+    # Clean up checkpoint files: extraction succeeded, no longer needed.
+    # if a chunk fileis already gone (e.g. manual cleanup) that is not an error.
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        try:
+            with open(checkpoint_path, "rb") as fh:
+                ckpt_meta = pickle.load(fh)
+            for chunk_file in ckpt_meta.get("chunk_paths", []):
+                if os.path.exists(chunk_file):
+                    os.remove(chunk_file)
+        except Exception:  # nosec B110 - chunk files may already be deleted, non-fatal
+            pass
+        os.remove(checkpoint_path)
+        print("  Checkpoint files removed (extraction complete)")
 
     # Summary statistics
     meta_cols = ["sid", "label", "window_idx", "is_overlapped"]
