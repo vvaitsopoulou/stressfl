@@ -688,8 +688,11 @@ class WESADFeatureExtractor:
         start_idx = 0
         chunk_paths: list[str] = []  # paths to already-flushed chunk files on disk
 
+        # helpers (take explicit path arg so mypy can verify str, not str | None)
+
         def flush_chunk(path: str, batch: list[dict], chunk_idx: int) -> str:
             chunk_file = f"{path}.chunk_{chunk_idx}"
+            os.makedirs(os.path.dirname(os.path.abspath(chunk_file)), exist_ok=True)
             pd.DataFrame(batch).to_pickle(chunk_file)
             return chunk_file
 
@@ -773,7 +776,7 @@ class WESADFeatureExtractor:
                         f"  💾 Chunk {len(chunk_paths)} saved "
                         f"({len(current_batch)} rows → ...chunk_{len(chunk_paths) - 1})"
                     )
-                    current_batch = []  # release memory — this is the key fix
+                    current_batch = []  # release memory
 
             # Flush any remaining rows in the final partial batch
             if checkpoint_path and current_batch:
@@ -794,6 +797,7 @@ class WESADFeatureExtractor:
                 ignore_index=True,
             )
         elif current_batch:
+            # checkpoint_path was None, small run, everything is still in current_batch
             df_features = pd.DataFrame(current_batch)
         else:
             raise ValueError("No features extracted from any window!")
@@ -1048,6 +1052,9 @@ def run_feature_pipeline(
     #     Final feature matrix, saved to output_path.
     print("WESAD Feature Extraction Pipeline")
 
+    # Ensure output directory exists before anything touches disk
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
     # Auto-generate checkpoint path from output_path if not specified
     if checkpoint_path is None:
         checkpoint_path = output_path.replace(".pkl", "_checkpoint.pkl")
@@ -1083,7 +1090,8 @@ def run_feature_pipeline(
     print(f"  Columns: {list(df_features.columns)}")
 
     # Clean up checkpoint files: extraction succeeded, no longer needed.
-    # if a chunk fileis already gone (e.g. manual cleanup) that is not an error.
+    # Chunk deletion failures are intentionally swallowed: if a chunk file
+    # is already gone (e.g. manual cleanup) that is not an error.
     if checkpoint_path and os.path.exists(checkpoint_path):
         try:
             with open(checkpoint_path, "rb") as fh:
