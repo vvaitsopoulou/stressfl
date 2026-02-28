@@ -132,6 +132,7 @@ class TreeFeatureSelector:
         self.random_state = random_state
         self._rf = RandomForestClassifier(
             n_estimators=n_estimators,
+            class_weight="balanced",
             random_state=random_state,
             n_jobs=-1,
         )
