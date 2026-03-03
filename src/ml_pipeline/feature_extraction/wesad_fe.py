@@ -34,6 +34,7 @@
 #   Makowski, D. et al. (2021). NeuroKit2. Behavior Research Methods.
 #   Task Force of ESC and NASPE (1996). HRV Standards of measurement.
 
+import contextlib
 import json
 import os
 import pickle
@@ -659,81 +660,72 @@ class WESADFeatureExtractor:
     ) -> pd.DataFrame:
         # Extract features from all windows with periodic checkpointing.
         #
-        # KEY DESIGN: each checkpoint batch is flushed to a numbered chunk file on
-        # disk rather than accumulated in RAM. This prevents memory exhaustion on large
-        # runs (e.g. 121k windows at 0.25s slide). Peak RAM usage is ~checkpoint_every
-        # rows at a time rather than the full dataset.
+        # KEY DESIGN: each checkpoint batch is flushed to a separate file on disk
+        # rather than accumulated in RAM. This prevents memory exhaustion on large
+        # runs (e.g. 121k windows at 0.25s slide). On resume, only the metadata
+        # file is loaded; the chunk files stay on disk until the final concat.
         #
-        # Checkpoint file layout (co-located with checkpoint_path):
-        #   <checkpoint_path>           — metadata: next_idx, failed, chunk_paths
-        #   <checkpoint_path>.chunk_0   — first batch as a pickled DataFrame
-        #   <checkpoint_path>.chunk_1   — second batch, etc.
+        # Checkpoint file layout (all in same dir as checkpoint_path):
+        #   <checkpoint_path>          — metadata: next_idx, failed, chunk_paths
+        #   <checkpoint_path>.chunk_0  — first batch as pickled DataFrame
+        #   <checkpoint_path>.chunk_1  — second batch, etc.
         #
         # Parameters
         # checkpoint_path : str, optional
-        #     Path for checkpoint metadata file. If provided and the file exists,
-        #     resumes from the last saved state. If None, runs fully in-memory
-        #     (original behaviour, fine for small window counts).
+        #     Path for checkpoint metadata file. Auto-generated from output_path
+        #     if called via run_feature_pipeline.
         # checkpoint_every : int
-        #     Flush a chunk and update metadata every N windows (default: 1000).
+        #     Flush a chunk and save metadata every N windows (default: 1000).
         #
         # Returns:
         # pd.DataFrame
-        #     One row per window, columns are feature names plus metadata
-        #     (sid, label, window_idx, is_overlapped).
+        #     One row per window with metadata cols (sid, label, window_idx, is_overlapped).
 
         total = len(self.windows)
-        current_batch: list[dict] = []  # holds only ONE chunk at a time
+        current_batch: list[dict] = []  # only holds ONE chunk at a time
         failed = 0
         start_idx = 0
-        chunk_paths: list[str] = []  # paths to already-flushed chunk files on disk
+        chunk_paths: list[str] = []  # paths to already-flushed chunk files
 
-        # helpers (take explicit path arg so mypy can verify str, not str | None)
-
-        def flush_chunk(path: str, batch: list[dict], chunk_idx: int) -> str:
-            chunk_file = f"{path}.chunk_{chunk_idx}"
-            os.makedirs(os.path.dirname(os.path.abspath(chunk_file)), exist_ok=True)
-            pd.DataFrame(batch).to_pickle(chunk_file)
-            return chunk_file
-
-        def save_meta(path: str, next_idx: int) -> None:
-            meta = {"failed": failed, "next_idx": next_idx, "chunk_paths": chunk_paths}
-            with open(path, "wb") as fh:
-                pickle.dump(meta, fh)
-
-        # Resume from checkpoint if available
+        # Resume from checkpoint
         if checkpoint_path and os.path.exists(checkpoint_path):
             with open(checkpoint_path, "rb") as fh:
-                ckpt_meta = pickle.load(fh)
-            failed = ckpt_meta["failed"]
-            start_idx = ckpt_meta["next_idx"]
-            chunk_paths = ckpt_meta["chunk_paths"]
-            already_done = sum(
+                meta = pickle.load(fh)
+            failed = meta["failed"]
+            start_idx = meta["next_idx"]
+            chunk_paths = meta["chunk_paths"]
+            already_extracted = sum(
                 len(pd.read_pickle(p)) for p in chunk_paths if os.path.exists(p)
             )
             print(
                 f"  ▶ Resuming from checkpoint: {start_idx}/{total} windows done "
-                f"({already_done} rows in {len(chunk_paths)} chunks, {failed} failed)"
+                f"({already_extracted} rows in {len(chunk_paths)} chunks, {failed} failed)"
             )
 
         start_time = time.time()
 
-        # Suppress expected NeuroKit2 and numerical warnings during batch extraction.
-        # Suppression is appropriate here: warnings are expected, documented, and handled
-        # at the extractor level via try/except. NK2 emits peak-detection and convergence
-        # warnings on almost every window by design. Warnings are restored when the
-        # with-block exits.
+        def _flush_chunk(batch: list[dict], idx: int) -> str:
+            # Write a batch of feature dicts to a numbered chunk file and return its path.
+            assert checkpoint_path is not None
+            chunk_file = f"{checkpoint_path}.chunk_{idx}"
+            pd.DataFrame(batch).to_pickle(chunk_file)
+            return chunk_file
+
+        def _save_meta(next_idx: int) -> None:
+            assert checkpoint_path is not None
+            meta = {"failed": failed, "next_idx": next_idx, "chunk_paths": chunk_paths}
+            with open(checkpoint_path, "wb") as fh:
+                pickle.dump(meta, fh)
+
+        # Main extraction loop
         with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", category=RuntimeWarning
-            )  # numpy/scipy numerical edge cases
-            warnings.filterwarnings(
-                "ignore", category=UserWarning
-            )  # NeuroKit2 peak detection warnings
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            warnings.filterwarnings("ignore", category=UserWarning)
 
             for i in range(start_idx, total):
                 window = self.windows[i]
 
+                # Progress print every 100 windows
                 if i > start_idx and (i - start_idx) % 100 == 0:
                     elapsed = time.time() - start_time
                     done_this_run = i - start_idx
@@ -761,51 +753,50 @@ class WESADFeatureExtractor:
                         print(f"  Error on window {i} (S{window['sid']}): {e}")
                         traceback.print_exc()
 
-                # Periodic flush to disk
+                # flush
                 if (
                     checkpoint_path
                     and (i + 1) % checkpoint_every == 0
                     and current_batch
                 ):
-                    chunk_file = flush_chunk(
-                        checkpoint_path, current_batch, len(chunk_paths)
-                    )
+                    chunk_file = _flush_chunk(current_batch, len(chunk_paths))
                     chunk_paths.append(chunk_file)
-                    save_meta(checkpoint_path, i + 1)
+                    _save_meta(i + 1)
                     print(
                         f"  💾 Chunk {len(chunk_paths)} saved "
-                        f"({len(current_batch)} rows → ...chunk_{len(chunk_paths) - 1})"
+                        f"({len(current_batch)} rows → {chunk_file})"
                     )
-                    current_batch = []  # release memory
+                    current_batch = []  # ← release memory
 
-            # Flush any remaining rows in the final partial batch
+            # Flush any remaining rows
             if checkpoint_path and current_batch:
-                chunk_file = flush_chunk(
-                    checkpoint_path, current_batch, len(chunk_paths)
-                )
+                chunk_file = _flush_chunk(current_batch, len(chunk_paths))
                 chunk_paths.append(chunk_file)
-                save_meta(checkpoint_path, total)
+                _save_meta(total)
                 current_batch = []
 
+        # Concat all chunks
         elapsed = time.time() - start_time
+        print(
+            f"\nExtraction loop done in {elapsed:.1f}s. Concatenating {len(chunk_paths)} chunks..."
+        )
 
-        # Concat all chunks from disk (or fall back to in-memory if no checkpointing)
         if chunk_paths:
-            print(f"\nConcatenating {len(chunk_paths)} chunk files from disk...")
             df_features = pd.concat(
                 [pd.read_pickle(p) for p in chunk_paths if os.path.exists(p)],
                 ignore_index=True,
             )
         elif current_batch:
-            # checkpoint_path was None, small run, everything is still in current_batch
+            # No checkpointing was used (checkpoint_path=None) : fall back to in-memory
             df_features = pd.DataFrame(current_batch)
         else:
             raise ValueError("No features extracted from any window!")
 
         df_features.replace([np.inf, -np.inf], np.nan, inplace=True)
 
+        total_extracted = len(df_features)
         print("\nFeature extraction complete:")
-        print(f"  Processed: {len(df_features)}/{total} windows ({failed} failed)")
+        print(f"  Processed: {total_extracted}/{total} windows ({failed} failed)")
         print(f"  Time: {elapsed:.1f}s ({total / max(elapsed, 1):.1f} windows/sec)")
         print(f"  Feature matrix shape: {df_features.shape}")
         print(f"  NaN count: {df_features.isna().sum().sum()}")
@@ -1052,9 +1043,6 @@ def run_feature_pipeline(
     #     Final feature matrix, saved to output_path.
     print("WESAD Feature Extraction Pipeline")
 
-    # Ensure output directory exists before anything touches disk
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-
     # Auto-generate checkpoint path from output_path if not specified
     if checkpoint_path is None:
         checkpoint_path = output_path.replace(".pkl", "_checkpoint.pkl")
@@ -1089,19 +1077,17 @@ def run_feature_pipeline(
     print(f"  Shape: {df_features.shape}")
     print(f"  Columns: {list(df_features.columns)}")
 
-    # Clean up checkpoint files: extraction succeeded, no longer needed.
-    # Chunk deletion failures are intentionally swallowed: if a chunk file
-    # is already gone (e.g. manual cleanup) that is not an error.
+    # Clean up checkpoint files: extraction succeeded, no longer needed
     if checkpoint_path and os.path.exists(checkpoint_path):
-        try:
+        # Load metadata to find chunk file paths before deleting the metadata file
+        with contextlib.suppress(Exception):
             with open(checkpoint_path, "rb") as fh:
                 ckpt_meta = pickle.load(fh)
             for chunk_file in ckpt_meta.get("chunk_paths", []):
-                if os.path.exists(chunk_file):
+                with contextlib.suppress(OSError):
                     os.remove(chunk_file)
-        except Exception:  # nosec B110 - chunk files may already be deleted, non-fatal
-            pass
-        os.remove(checkpoint_path)
+        with contextlib.suppress(OSError):
+            os.remove(checkpoint_path)
         print("  Checkpoint files removed (extraction complete)")
 
     # Summary statistics
@@ -1111,5 +1097,292 @@ def run_feature_pipeline(
     print(f"  Window count: {len(df_features)}")
     label_dist = df_features["label"].value_counts().to_dict()
     print(f"  Label distribution: {label_dist}")
+
+    return df_features
+
+
+# Subject-streaming pipeline  (memory-safe alternative to run_feature_pipeline)
+
+
+def run_feature_pipeline_streaming(
+    data_path: str,
+    windows: list[dict],
+    config_path: str,
+    output_path: str,
+    wrist: bool = False,
+    baseline_label: float = 1.0,
+    normalize: bool = True,
+    impute: bool = True,
+    impute_strategy: str = "median",
+) -> pd.DataFrame:
+    """Memory-safe feature extraction that loads one subject at a time.
+
+    Instead of loading the entire 60M-row DataFrame into RAM and keeping
+    15 per-subject slices alive simultaneously, this function:
+
+      1. Iterates over subjects one at a time.
+      2. Loads only that subject's rows from disk.
+      3. Extracts features for all windows of that subject.
+      4. Writes a per-subject chunk file and frees the data immediately.
+      5. Concatenates all chunks at the end.
+
+    Normalization and imputation are applied globally after all subjects
+    are done, exactly as in run_feature_pipeline.
+
+    Parameters
+    ----------
+    data_path : str
+        Path to the preprocessed merged pickle (chest or wrist).
+    windows : list[dict]
+        Window metadata from WESADWindowing.segment().
+    config_path : str
+        Path to the JSON dataset config.
+    output_path : str
+        Destination path for the final feature matrix pickle.
+    wrist, baseline_label, normalize, impute, impute_strategy
+        Same semantics as run_feature_pipeline.
+    """
+    import gc
+
+    print(f"\n{'='*60}")
+    print(
+        f"WESAD Feature Extraction  ({'wrist' if wrist else 'chest'})  — streaming mode"
+    )
+    print(f"{'='*60}")
+
+    # Config
+    with open(config_path) as f:
+        config = json.load(f)
+    sensors = [k for k, v in config["sensors"].items() if v]
+    sensor_rates = config["sampling rate"]
+    sampling_rate = int(max(sensor_rates.values()))
+
+    acc_cols = (
+        ["w_acc_x", "w_acc_y", "w_acc_z"]
+        if wrist
+        else ["c_acc_x", "c_acc_y", "c_acc_z"]
+    )
+    acc_subwindow_samples = int(5.0 * sampling_rate)
+
+    meta_cols = ["sid", "label", "window_idx", "is_overlapped"]
+
+    # Group windows by subject (avoids repeated full-list scans)
+    from collections import defaultdict
+
+    windows_by_sid: dict = defaultdict(list)
+    for w in windows:
+        windows_by_sid[w["sid"]].append(w)
+
+    subject_ids = sorted(windows_by_sid.keys())
+    print(f"Subjects to process : {[int(s) for s in subject_ids]}")
+    print(f"Total windows       : {len(windows)}")
+    print(f"Active sensors      : {sensors}\n")
+
+    chunk_dir = os.path.dirname(output_path)
+    os.makedirs(chunk_dir, exist_ok=True)
+    chunk_paths: list[str] = []
+
+    # Load the full DataFrame ONCE, write each subject to a temp file, then
+    # free the big DataFrame.  This avoids re-reading 5 GB × 15 subjects.
+    import tempfile
+
+    subject_file_map: dict[float, str] = {}
+    split_dir = tempfile.mkdtemp(prefix="wesad_fe_split_")
+
+    print(f"Pre-splitting {data_path} by subject …")
+    full_df = pd.read_pickle(data_path)
+    for sid in subject_ids:
+        subj_path = os.path.join(split_dir, f"subj_{int(sid)}.pkl")
+        full_df[full_df["sid"] == sid].reset_index(drop=True).to_pickle(subj_path)
+        subject_file_map[sid] = subj_path
+    del full_df
+    gc.collect()
+    print(f"  Split into {len(subject_file_map)} files in {split_dir}\n")
+
+    # Per-subject extraction
+    t_start = time.time()
+    total_failed = 0
+
+    for sid in subject_ids:
+        sid_windows = windows_by_sid[sid]
+        print(f"\n── Subject {int(sid)}  ({len(sid_windows)} windows) ──")
+
+        # Load only this subject's pre-split file (300 MB per subject)
+        subject_df = pd.read_pickle(subject_file_map[sid])
+        print(f"  Subject rows loaded: {len(subject_df):,}")
+        rows: list[dict] = []
+        failed = 0
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            warnings.filterwarnings("ignore", category=UserWarning)
+
+            for i, window in enumerate(sid_windows):
+                if i > 0 and i % 200 == 0:
+                    elapsed = time.time() - t_start
+                    print(
+                        f"    [{i}/{len(sid_windows)}]  total elapsed: {elapsed/60:.1f} min  failed: {failed}"
+                    )
+
+                try:
+                    window_df = subject_df.iloc[
+                        window["start_sample"] : window["end_sample"]
+                    ]
+                    feats: dict = {}
+
+                    for sensor in sensors:
+                        match sensor:
+                            case "ecg":
+                                feats.update(
+                                    _extract_ecg_features(
+                                        window_df["ecg"].values,
+                                        sensor_rates.get("ecg", sampling_rate),
+                                    )
+                                )
+                            case "emg":
+                                feats.update(
+                                    _extract_emg_features(
+                                        window_df["emg"].values,
+                                        sensor_rates.get("emg", sampling_rate),
+                                    )
+                                )
+                            case "c_eda":
+                                sensor_feats: dict = _extract_eda_features(
+                                    window_df["c_eda"].values,
+                                    sensor_rates.get("c_eda", sampling_rate),
+                                )
+                                feats.update(
+                                    {f"C_{k}": v for k, v in sensor_feats.items()}
+                                )
+                            case "c_temp":
+                                sensor_feats = _extract_temp_features(
+                                    window_df["c_temp"].values
+                                )
+                                feats.update(
+                                    {f"C_{k}": v for k, v in sensor_feats.items()}
+                                )
+                            case "resp":
+                                feats.update(
+                                    _extract_resp_features(
+                                        window_df["resp"].values,
+                                        sensor_rates.get("resp", sampling_rate),
+                                    )
+                                )
+                            case "c_acc":
+                                feats.update(
+                                    _extract_acc_features_aggregated(
+                                        window_df,
+                                        acc_cols,
+                                        acc_subwindow_samples,
+                                        sensor_rates.get("c_acc_x", sampling_rate),
+                                    )
+                                )
+                            case "bvp":
+                                feats.update(
+                                    _extract_bvp_features(
+                                        window_df["bvp"].values,
+                                        sensor_rates.get("bvp", sampling_rate),
+                                    )
+                                )
+                            case "w_eda":
+                                sensor_feats = _extract_eda_features(
+                                    window_df["w_eda"].values,
+                                    sensor_rates.get("w_eda", sampling_rate),
+                                )
+                                feats.update(
+                                    {f"W_{k}": v for k, v in sensor_feats.items()}
+                                )
+                            case "w_temp":
+                                sensor_feats = _extract_temp_features(
+                                    window_df["w_temp"].values
+                                )
+                                feats.update(
+                                    {f"W_{k}": v for k, v in sensor_feats.items()}
+                                )
+                            case "w_acc":
+                                feats.update(
+                                    _extract_acc_features_aggregated(
+                                        window_df,
+                                        acc_cols,
+                                        acc_subwindow_samples,
+                                        sensor_rates.get("w_acc_x", sampling_rate),
+                                    )
+                                )
+
+                    if feats:
+                        feats["sid"] = window["sid"]
+                        feats["label"] = window["label"]
+                        feats["window_idx"] = window["window_idx"]
+                        feats["is_overlapped"] = window["is_overlapped"]
+                        rows.append(feats)
+                    else:
+                        failed += 1
+
+                except Exception as exc:
+                    failed += 1
+                    if failed <= 3:
+                        print(f"    Error on window {i}: {exc}")
+
+        total_failed += failed
+        print(
+            f"  Done: {len(rows)} windows successfully processed to extract features, {failed} failed."
+        )
+
+        # Write subject chunk and free memory
+        chunk_path = os.path.join(chunk_dir, f"_chunk_sid{int(sid)}.pkl")
+        pd.DataFrame(rows).to_pickle(chunk_path)
+        chunk_paths.append(chunk_path)
+        print(f"  Chunk saved → {chunk_path}")
+
+        del subject_df, rows
+        gc.collect()
+
+    # Concatenate all subject chunks
+    print(f"\nConcatenating {len(chunk_paths)} subject chunks …")
+    df_features = pd.concat(
+        [pd.read_pickle(p) for p in chunk_paths],
+        ignore_index=True,
+    )
+    df_features.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # Clean up chunks
+    for p in chunk_paths:
+        with contextlib.suppress(OSError):
+            os.remove(p)
+
+    # Clean up pre-split temp files
+    import shutil
+
+    with contextlib.suppress(OSError):
+        shutil.rmtree(split_dir)
+
+    print(f"Raw feature matrix shape : {df_features.shape}")
+    print(f"Total failed windows     : {total_failed}")
+
+    # Normalization
+    if normalize:
+        print("\nApplying per-subject min-max normalization (baseline-referenced) …")
+        df_features = normalize_per_subject(df_features, baseline_label=baseline_label)
+
+    # Imputation
+    if impute:
+        print("\nImputing missing values …")
+        df_features = impute_features(df_features, strategy=impute_strategy)
+
+    # Save
+    df_features.to_pickle(output_path)
+    elapsed = time.time() - t_start
+
+    feat_cols = [c for c in df_features.columns if c not in meta_cols]
+    print(f"\n{'='*60}")
+    print(f"Feature extraction complete  ({elapsed/60:.1f} min total)")
+    print(f"  Output           : {output_path}")
+    print(f"  Shape            : {df_features.shape}")
+    print(f"  Feature count    : {len(feat_cols)}")
+    print(
+        f"  Label dist       : {df_features['label'].value_counts().sort_index().to_dict()}"
+    )
+    print(f"  NaN count        : {df_features[feat_cols].isna().sum().sum()}")
+    print(f"{'='*60}\n")
 
     return df_features
