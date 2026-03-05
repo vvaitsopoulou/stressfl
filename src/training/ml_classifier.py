@@ -90,7 +90,7 @@ class WESADClassifier:
         Scoring metric for RandomizedSearchCV. Default "f1_weighted".
     n_iter : int
         Number of random hyperparameter combinations to sample per fold
-        (default: 80). Bergstra & Bengio (2012) show random search finds
+        (default: 60). Bergstra & Bengio (2012) show random search finds
         equally good solutions as grid search in fewer evaluations.
     n_inner_cv : int
         Number of inner CV folds for RandomizedSearchCV (default: 3).
@@ -108,7 +108,7 @@ class WESADClassifier:
         feature_selection_kwargs: dict | None = None,
         param_grid: dict | None = None,
         scoring: str = "f1_weighted",
-        n_iter: int = 80,
+        n_iter: int = 60,
         n_inner_cv: int = 3,
         random_state: int = 42,
         output_dir: str = "results/",
@@ -240,6 +240,22 @@ class WESADClassifier:
                 f"  Val:   {len(df_val)} windows "
                 f"(labels: {y_val.value_counts().to_dict()})"
             )
+
+            # Imputation (fit on train only to prevent leakage)
+            _feature_cols = [
+                c for c in df_train.columns if c not in _META_COLS + ["mapped_label"]
+            ]
+            n_nan_train = df_train[_feature_cols].isna().sum().sum()
+            n_nan_val = df_val[_feature_cols].isna().sum().sum()
+            if n_nan_train > 0 or n_nan_val > 0:
+                fill_values = df_train[_feature_cols].median()
+                fill_values = fill_values.fillna(0.0)
+                df_train[_feature_cols] = df_train[_feature_cols].fillna(fill_values)
+                df_val[_feature_cols] = df_val[_feature_cols].fillna(fill_values)
+                print(
+                    f"  Imputation: {n_nan_train} train NaN, {n_nan_val} val NaN "
+                    f"→ filled with train-fold median"
+                )
 
             # ── Feature Selection (fit on train only) ──
             print(f"\n  Feature selection ({self.fs_method}):")
