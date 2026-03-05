@@ -1008,7 +1008,7 @@ def run_feature_pipeline(
     baseline_label: float = 1.0,
     normalize: bool = True,
     impute: bool = True,
-    impute_strategy: str = "median",
+    # impute_strategy: str = "median",
     checkpoint_path: str | None = None,
     checkpoint_every: int = 1000,
 ) -> pd.DataFrame:
@@ -1067,8 +1067,16 @@ def run_feature_pipeline(
 
     # Imputation
     if impute:
-        print("\nImputing missing values...")
-        df_features = impute_features(df_features, strategy=impute_strategy)
+        meta = ["sid", "label", "window_idx", "is_overlapped"]
+        n_nan = (
+            df_features[[c for c in df_features.columns if c not in meta]]
+            .isna()
+            .sum()
+            .sum()
+        )
+        print(
+            f"\n  Skipping global imputation (will be done inside CV loop). NaN count: {n_nan}"
+        )
 
     #  Save
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -1113,7 +1121,7 @@ def run_feature_pipeline_streaming(
     baseline_label: float = 1.0,
     normalize: bool = True,
     impute: bool = True,
-    impute_strategy: str = "median",
+    # impute_strategy: str = "median",
 ) -> pd.DataFrame:
     """Memory-safe feature extraction that loads one subject at a time.
 
@@ -1366,8 +1374,15 @@ def run_feature_pipeline_streaming(
 
     # Imputation
     if impute:
-        print("\nImputing missing values …")
-        df_features = impute_features(df_features, strategy=impute_strategy)
+        n_nan = (
+            df_features[[c for c in df_features.columns if c not in meta_cols]]
+            .isna()
+            .sum()
+            .sum()
+        )
+        print(
+            f"\n  Skipping global imputation (will be done inside CV loop). NaN count: {n_nan}"
+        )
 
     # Save
     df_features.to_pickle(output_path)
