@@ -1215,6 +1215,12 @@ def run_feature_pipeline_streaming(
         sid_windows = windows_by_sid[sid]
         print(f"\n── Subject {int(sid)}  ({len(sid_windows)} windows) ──")
 
+        chunk_path = os.path.join(chunk_dir, f"_chunk_sid{int(sid)}.pkl")
+        if os.path.exists(chunk_path):
+            print(f"  Chunk EXISTS! Skipping extraction. -> {chunk_path}")
+            chunk_paths.append(chunk_path)
+            continue
+
         # Load only this subject's pre-split file (300 MB per subject)
         subject_df = pd.read_pickle(subject_file_map[sid])
         print(f"  Subject rows loaded: {len(subject_df):,}")
