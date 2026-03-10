@@ -20,11 +20,14 @@ from .wesad_dl_preprocess import (
     NATIVE_HZ,
 )
 
+from .wesad_dl_dataset import WESADDLDataset, build_loso_datasets, ALL_SUBJECT_IDS
+
 # Define what gets imported
 __all__ = [
     # Main class
     "WESADResampleMerge",
     "SignalPreprocessor",
+    "WESADDLDataset",
     # Metadata extraction functions
     "extract_wesad_metadata",
     "infer_sampling_rates",
@@ -34,8 +37,10 @@ __all__ = [
     # Deep learning pipline preprocessing functions
     "prepare_all",
     "process_subject",
+    "build_loso_datasets",
     # Constants
     "LABEL_FREQ",
     "DL_TARGET_HZ",
     "NATIVE_HZ",
+    "ALL_SUBJECT_IDS",
 ]

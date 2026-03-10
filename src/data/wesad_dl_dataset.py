@@ -456,7 +456,7 @@ def build_loso_datasets(
       and test has 1.
     """
     if label_map is None:
-        label_map = LABEL_MAP_3CLASS
+        label_map = LABEL_MAP_BINARY
 
     remaining = [s for s in ALL_SUBJECT_IDS if s != test_subject]
 
