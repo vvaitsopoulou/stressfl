@@ -459,7 +459,33 @@ def run_loso(
     start_time = time.time()
     fold_results = []
 
+    # load previously completed folds:
+    # On crash and restart, completed folds are loaded from disk and
+    # skipped.
+    progress_dir = os.path.join(config.output_dir, "_fold_results")
+    os.makedirs(progress_dir, exist_ok=True)
+
+    completed_sids = set()
     for test_sid in subject_ids:
+        fold_result_path = os.path.join(progress_dir, f"fold_S{test_sid}.json")
+        if os.path.exists(fold_result_path):
+            with open(fold_result_path) as f:
+                cached = json.load(f)
+            fold_results.append(cached)
+            completed_sids.add(test_sid)
+
+    if completed_sids:
+        print(
+            f"\n  Resuming: {len(completed_sids)} folds already complete "
+            f"({sorted(completed_sids)})"
+        )
+        print(f"  Remaining: {[s for s in subject_ids if s not in completed_sids]}")
+
+    for test_sid in subject_ids:
+        if test_sid in completed_sids:
+            print(f"\n  Fold S{test_sid}: already complete — skipping")
+            continue
+
         print("\n")
         print(f"  Fold: test = S{test_sid}")
         print("\n")
@@ -467,11 +493,17 @@ def run_loso(
         result = train_one_fold(test_sid, config, device)
         fold_results.append(result)
 
-    # Aggregate
+        # Save fold result immediately (crash protection)
+        fold_result_path = os.path.join(progress_dir, f"fold_S{test_sid}.json")
+        with open(fold_result_path, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+        print(f"    Fold checkpoint saved → {fold_result_path}")
+
+    # aggregate
     valid_results = [r for r in fold_results if not r.get("skipped", False)]
 
     if not valid_results:
-        print("  ⚠  No valid folds — check data paths")
+        print("   No valid folds —> check data paths")
         return {"fold_results": fold_results}
 
     accs = [r["accuracy"] for r in valid_results]
@@ -497,7 +529,9 @@ def run_loso(
         "total_time": total_time,
     }
 
-    print("  LOSO RESULTS SUMMARY\n")
+    print("\n")
+    print("  LOSO RESULTS SUMMARY")
+    print("\n")
     print(
         f"  Accuracy:      {summary['accuracy_mean']:.4f} ± {summary['accuracy_std']:.4f}"
     )
