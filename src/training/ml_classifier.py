@@ -4,15 +4,47 @@
 # using Leave-One-Subject-Out Cross-Validation (LOSOCV) with nested
 # hyperparameter tuning via RandomizedSearchCV.
 #
-#   - Outer loop: LOSO: each of 15 subjects is held out as test exactly once.
-#   - Inner loop: RandomizedSearchCV on the 14 training subjects for hyperparameter tuning.
-#   - Feature selection: fit on training fold only, transform both folds (no leakage).
-#   - Overlapped windows: included in training, excluded from validation/test.
+# Pipeline order per fold:
+#   1. LOSO split: train = other subjects, test = held-out subject.
+#   2. Drop structurally-NaN features (>80% missing across full dataset, done once).
+#   3. Imputation: fit median on training fold only, apply to both folds.
+#   4. Normalization: StandardScaler fit on training fold only, apply to both folds.
+#   5. Feature selection: fit on training fold only, transform both folds.
+#   6. Nested RandomizedSearchCV: tune RF on the training subjects.
+#   7. Evaluate: best model predicts the held-out subject.
+#
+# Normalization strategy:
+#   StandardScaler (Z-score) fit inside the LOSO fold on training data only.
+#   This avoids the data leakage caused by the previous per-subject baseline min-max normalization which
+#   computed scaling parameters from the test subject's own data before the
+#   LOSO split.
+#
+# Imputation strategy:
+#   Median imputation fit on the training fold only.  NaN values arise from
+#   NeuroKit2 failing to compute certain features (e.g. HRV frequency-domain
+#   when R-peak detection fails on a noisy window).  Training-fold median is
+#   used to fill both train and test NaNs so no test data influences the fill
+#   values.
+#
+#   Features that are structurally NaN (>80% missing across all subjects) are
+#   dropped entirely before the LOSO loop.  These are features that almost
+#   never compute successfully (e.g. HRV_SDANN1, HRV_SDNNI1 which require
+#   ~5-minute recordings but we have 60s windows).  Imputing them adds noise.
+#
+# Overlapped windows:
+#   Controlled by the train_independent_only flag:
+#     - False (default): all windows in training, independent only in test.
+#     - True: independent windows only in BOTH training and test.
+#   The 5s stride on 60s windows produces 91.7% overlap, meaning 11 out of
+#   every 12 training windows are near-duplicates.  This inflates inner CV
+#   scores and biases hyperparameter selection toward overfitting configs.
+#   Setting train_independent_only=True produces the cleanest evaluation
+#   but reduces training data from ~5,600 to ~535 windows.
 #
 # Metrics:
-#   Because stress data is inherently imbalanced (subjects spend more time at baseline),
-#   F1-Score (Weighted or Macro) is the primary metric. Accuracy alone is misleading
-#   if the model just predicts "No Stress" for every window.
+#   Because stress data is inherently imbalanced (subjects spend more time at
+#   baseline), F1-Score (Weighted or Macro) is the primary metric.  Accuracy
+#   alone is misleading if the model just predicts "No Stress" for every window.
 #
 #   Per-fold: Accuracy, Precision, Recall, F1 (weighted), confusion matrix.
 #   Aggregate: Mean ± STD across all 15 folds.
@@ -24,6 +56,11 @@
 #
 # References:
 #   Schmidt, P. et al. (2018). Introducing WESAD. ICMI '18.
+#   Probst, P., Wright, M. N. & Boulesteix, A.-L. (2019). Hyperparameters
+#       and tuning strategies for random forest. WIREs DMKD, 9(3), e1301.
+#   Bergstra, J. & Bengio, Y. (2012). Random search for hyper-parameter
+#       optimization. JMLR, 13, 281–305.
+#   Breiman, L. (2001). Random Forests. Machine Learning, 45(1), 5–32.
 #   Scikit-learn: StratifiedGroupKFold, RandomizedSearchCV, RandomForestClassifier.
 
 import os
@@ -43,6 +80,7 @@ from sklearn.metrics import (
     recall_score,
 )
 from sklearn.model_selection import RandomizedSearchCV, StratifiedGroupKFold
+from sklearn.preprocessing import StandardScaler
 
 from src.ml_pipeline.feature_selection import FeatureSelectionPipeline
 
@@ -62,10 +100,6 @@ def _map_labels(labels: pd.Series, label_map: dict) -> pd.Series:
     return labels.map(label_map).astype(int)
 
 
-# def _get_feature_cols(df: pd.DataFrame) -> list[str]:
-#     return [c for c in df.columns if c not in _META_COLS]
-
-
 #  LOSO-CV Pipeline
 
 
@@ -73,10 +107,13 @@ class WESADClassifier:
     """
     Random Forest classifier with LOSO-CV for WESAD stress detection.
 
-    Parameters:
+    Parameters
+    ----------
     df_features : pd.DataFrame
         Feature matrix from run_feature_pipeline(). Must contain columns:
         sid, label, window_idx, is_overlapped, plus feature columns.
+        IMPORTANT NOTE TO REMEMBER: Should be the UNNORMALIZED feature file!!  Normalization
+        is now handled inside the LOSO loop via StandardScaler.
     label_map : dict
         Label mapping to apply (LABEL_MAP_BINARY or LABEL_MAP_3CLASS).
     feature_selection_method : str
@@ -98,6 +135,19 @@ class WESADClassifier:
         Random seed for reproducibility.
     output_dir : str
         Directory to save results.
+    train_independent_only : bool
+        If True, use only non-overlapped (independent) windows for training.
+        If False (default), include overlapped windows in training.
+        Test always uses independent windows only regardless of this flag.
+    nan_threshold : float
+        Drop features where the fraction of NaN values exceeds this threshold
+        across the entire dataset.  Default 0.8 (drop features that are >80%
+        NaN).  These are structurally missing features that NeuroKit2 cannot
+        compute reliably on 60s windows (e.g. HRV_SDANN1 requires ~5 min).
+    normalize : bool
+        If True (default), apply StandardScaler normalization inside each
+        LOSO fold (fit on train, transform both).  Set to False for ablation
+        to test the effect of normalization.
     """
 
     def __init__(
@@ -112,6 +162,9 @@ class WESADClassifier:
         n_inner_cv: int = 3,
         random_state: int = 42,
         output_dir: str = "results/",
+        train_independent_only: bool = False,
+        nan_threshold: float = 0.8,
+        normalize: bool = True,
     ):
         if label_map is None:
             label_map = LABEL_MAP_BINARY
@@ -124,6 +177,9 @@ class WESADClassifier:
         self.n_inner_cv = n_inner_cv
         self.random_state = random_state
         self.output_dir = output_dir
+        self.train_independent_only = train_independent_only
+        self.nan_threshold = nan_threshold
+        self.normalize = normalize
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -133,14 +189,15 @@ class WESADClassifier:
         #   n_estimators: sklearn default (100) through stability plateau (~500).
         #       Probst & Boulesteix (2017) recommend searching until OOB error
         #       plateaus.
-        #   max_depth: 10–30 range prevents overfitting in LOSO (critical when
-        #       every test subject is entirely unseen). None = fully grown trees
-        #       (sklearn default) included as upper bound. 15 added for finer
-        #       resolution in the most impactful region.
+        #   max_depth: 5–15 range prevents overfitting in LOSO (critical when
+        #       every test subject is entirely unseen).  None (fully grown trees)
+        #       is excluded: combined with correlated overlapped windows and
+        #       min_samples_leaf=1 it produces near-perfect memorization.
         #   min_samples_split / min_samples_leaf: Probst, Wright & Boulesteix
         #       (2019) identify min node size as one of the two highest-impact
-        #       RF hyperparameters. Range from sklearn defaults (2/1) to moderate
-        #       regularisation (10/4).
+        #       RF hyperparameters. Pushed higher than sklearn defaults (2/1)
+        #       to force each split to represent a statistically meaningful
+        #       pattern rather than individual window noise.
         #   max_features: Identified as the single most impactful RF hyperparameter
         #       by Probst et al. (2019). "sqrt" is Breiman's (2001) original
         #       recommendation; "log2" adds more per-split randomness, beneficial
@@ -154,10 +211,10 @@ class WESADClassifier:
         #   Breiman, L. (2001). Random Forests. Machine Learning, 45(1), 5–32.
         if param_grid is None:
             self.param_grid = {
-                "n_estimators": [100, 200, 300, 500],
-                "max_depth": [10, 15, 20, 30, None],
-                "min_samples_split": [2, 5, 10],
-                "min_samples_leaf": [1, 2, 4],
+                "n_estimators": [100, 200, 300],
+                "max_depth": [5, 10, 15],
+                "min_samples_split": [10, 20, 50],
+                "min_samples_leaf": [5, 10, 20],
                 "max_features": ["sqrt", "log2"],
             }
         else:
@@ -166,17 +223,57 @@ class WESADClassifier:
         # Store the full feature matrix
         self.df = df_features.copy()
 
+        # Drop structurally-NaN features
+        # Features where >nan_threshold fraction of values are NaN are almost
+        # certainly features that NeuroKit2 cannot compute reliably on 60s
+        # windows
+        # Imputing them with a constant adds uninformative noise.
+        # This is computed on the FULL dataset before any split AND it is NOT
+        # leakage because we are only looking at the MISSINGNESS PATTERN
+        # (which columns have NaN), not at the actual feature VALUES.
+        # The decision to drop a column is structural (based on window length
+        # vs. feature requirements) not statistical.
+        feat_cols = [c for c in self.df.columns if c not in _META_COLS]
+        nan_frac = self.df[feat_cols].isna().mean()
+        self._dropped_nan_cols = nan_frac[nan_frac > nan_threshold].index.tolist()
+        if self._dropped_nan_cols:
+            self.df = self.df.drop(columns=self._dropped_nan_cols)
+            print(
+                f"  Dropped {len(self._dropped_nan_cols)} structurally-NaN features "
+                f"(>{nan_threshold*100:.0f}% missing):"
+            )
+            # Print first 10 for visibility
+            for col in self._dropped_nan_cols[:10]:
+                print(f"    - {col} ({nan_frac[col]*100:.1f}% NaN)")
+            if len(self._dropped_nan_cols) > 10:
+                print(f"    ... and {len(self._dropped_nan_cols) - 10} more")
+
         # Map labels dynamically
         self.df["mapped_label"] = _map_labels(self.df["label"], label_map)
 
         # Get subject IDs
         self.subjects = sorted(self.df["sid"].unique())
 
-        print("WESADClassifier initialized:")
+        # Report remaining NaN count for transparency
+        remaining_feat_cols = [
+            c for c in self.df.columns if c not in _META_COLS + ["mapped_label"]
+        ]
+        remaining_nan = self.df[remaining_feat_cols].isna().sum().sum()
+        total_values = len(self.df) * len(remaining_feat_cols)
+
+        print("\nWESADClassifier initialized:")
         print(f"  Subjects: {len(self.subjects)}")
         print(f"  Total windows: {len(self.df)}")
+        print(f"  Features: {len(remaining_feat_cols)}")
+        print(
+            f"  Remaining NaN: {remaining_nan} ({remaining_nan/total_values*100:.2f}% of values)"
+        )
         print(f"  Label map: {label_map}")
         print(f"  Feature selection: {feature_selection_method}")
+        print(
+            f"  Normalization: {'StandardScaler (inside LOSO fold)' if normalize else 'None'}"
+        )
+        print(f"  Train independent only: {train_independent_only}")
         print(f"  Scoring: {scoring}")
         print("  Label distribution:")
         print(f"    {self.df['mapped_label'].value_counts().to_dict()}")
@@ -186,20 +283,21 @@ class WESADClassifier:
         Run the full LOSO-CV pipeline.
 
         For each subject:
-        1. Split: train = all other subjects (overlapped included),
-                  test = held-out subject (independent windows only).
-        2. Feature selection: fit on train, transform both.
-        3. Nested RandomizedSearchCV: tune RF hyperparameters on the 14 training
+        1. Split: train = all other subjects, test = held-out subject
+           (independent windows only).
+        2. Imputation: fit median on training fold, apply to both.
+        3. Normalization: fit StandardScaler on training fold, apply to both.
+        4. Feature selection: fit on training fold, transform both.
+        5. Nested RandomizedSearchCV: tune RF hyperparameters on the training
            subjects using inner K-fold CV.
-        4. Evaluate: best model predicts the held-out subject.
+        6. Evaluate: best model predicts the held-out subject.
 
         Returns
+        -------
         dict
             Results with per-fold metrics, aggregate metrics, and
             best hyperparameters per fold.
         """
-        # feature_cols = _get_feature_cols(self.df)
-
         all_fold_results = []
         all_y_true = []
         all_y_pred = []
@@ -215,9 +313,14 @@ class WESADClassifier:
             )
 
             # ── Split ──
-            # Training: all subjects except held-out, overlapped windows included
+            # Training: all subjects except held-out
             train_mask = self.df["sid"] != held_out_sid
-            # Validation: held-out subject only, independent windows only
+
+            # Optionally restrict training to independent windows only
+            if self.train_independent_only:
+                train_mask = train_mask & (~self.df["is_overlapped"])
+
+            # Validation/test: held-out subject, independent windows only
             val_mask = (self.df["sid"] == held_out_sid) & (~self.df["is_overlapped"])
 
             df_train = self.df.loc[train_mask].reset_index(drop=True)
@@ -225,7 +328,8 @@ class WESADClassifier:
 
             if len(df_val) == 0:
                 print(
-                    f"  WARNING: No independent windows for Subject {int(held_out_sid)}. Skipping."
+                    f"  WARNING: No independent windows for Subject "
+                    f"{int(held_out_sid)}. Skipping."
                 )
                 continue
 
@@ -257,7 +361,49 @@ class WESADClassifier:
                     f"→ filled with train-fold median"
                 )
 
-            # ── Feature Selection (fit on train only) ──
+            # Normalization (fit on train only to prevent leakage)
+            # StandardScaler: Z-score normalization (mean=0, std=1) fit on
+            # training fold only.  This is the tabular-feature equivalent of
+            # the per-window instance Z-score used in the DL pipeline.
+            #
+            # Why StandardScaler and not the old per-subject baseline min-max:
+            #   The old normalize_per_subject() computed min/max from each
+            #   subject's own baseline windows BEFORE the LOSO split.  This
+            #   meant the test subject's features were scaled using their own
+            #   physiological data — data leakage.
+            #
+            #   StandardScaler fit inside the LOSO fold uses ONLY the 14
+            #   training subjects' statistics.  The held-out subject's features
+            #   are transformed using parameters derived entirely from other
+            #   subjects — zero leakage.
+            #
+            # Note: RF is scale-invariant (threshold-based splits), so this
+            # does not affect RF performance directly.  It is included for:
+            #   1. PCA-based feature selection (PCA is scale-sensitive)
+            #   2. Future classifier substitution (SVM, LDA, etc.)
+            #   3. Methodological consistency with the DL pipeline
+            if self.normalize:
+                scaler = StandardScaler()
+                df_train[_feature_cols] = scaler.fit_transform(df_train[_feature_cols])
+                df_val[_feature_cols] = scaler.transform(df_val[_feature_cols])
+
+                # Report any zero-variance features (scaler divides by 0 → NaN)
+                zero_var = (scaler.scale_ == 0).sum()
+                if zero_var > 0:
+                    print(
+                        f"  Normalization: StandardScaler applied. "
+                        f"WARNING: {zero_var} features have zero variance in "
+                        f"training fold (set to 0 after scaling)."
+                    )
+                    # Replace any NaN/inf from zero-variance division
+                    df_train[_feature_cols] = df_train[_feature_cols].fillna(0.0)
+                    df_val[_feature_cols] = df_val[_feature_cols].fillna(0.0)
+                else:
+                    print("  Normalization: StandardScaler applied.")
+            else:
+                print("  Normalization: SKIPPED (normalize=False)")
+
+            # Feature Selection (fit on train only)
             print(f"\n  Feature selection ({self.fs_method}):")
             fs_pipeline = FeatureSelectionPipeline(
                 method=self.fs_method, **self.fs_kwargs
@@ -272,7 +418,7 @@ class WESADClassifier:
             X_train = df_train_fs[selected_features].values
             X_val = df_val_fs[selected_features].values
 
-            # ── Nested RandomizedSearchCV (inner CV on training subjects) ──
+            # Nested RandomizedSearchCV (inner CV on training subjects)
             # Bergstra & Bengio (2012) show random search finds equally good
             # solutions as grid search in fewer evaluations because not all
             # hyperparameters are equally important and random search doesn't
@@ -284,9 +430,10 @@ class WESADClassifier:
 
             train_groups = df_train["sid"].values
 
-            # Inner CV uses StratifiedGroupKFold to respect both subject boundaries
-            # and label distribution, prevents inner folds where stress/baseline
-            # proportions vary wildly due to small subject counts per fold.
+            # Inner CV uses StratifiedGroupKFold to respect both subject
+            # boundaries and label distribution, prevents inner folds where
+            # stress/baseline proportions vary wildly due to small subject
+            # counts per fold.
             inner_cv = StratifiedGroupKFold(
                 n_splits=min(self.n_inner_cv, len(df_train["sid"].unique()))
             )
@@ -320,26 +467,43 @@ class WESADClassifier:
             y_pred_proba = best_model.predict_proba(X_val)
 
             # Explicit labels= prevents crashes when a held-out subject is
-            # missing a class (e.g. no amusement windows) and ensures confusion
-            # matrices are the same shape across all folds and log_loss
-            # columns align with predict_proba output.
+            # missing a class (e.g. no amusement windows) and ensures
+            # confusion matrices are the same shape across all folds and
+            # log_loss columns align with predict_proba output.
             all_classes = sorted(self.df["mapped_label"].unique())
 
             # Compute metrics
-            # labels=all_classes ensures consistent shape across folds and penalises
-            # folds where a class is absent from the held-out subject (correct for LOSO).
+            # labels=all_classes ensures consistent shape across folds and
+            # penalises folds where a class is absent from the held-out
+            # subject (correct for LOSO).
             acc = accuracy_score(y_val, y_pred)
             f1_w = f1_score(
-                y_val, y_pred, average="weighted", zero_division=0, labels=all_classes
+                y_val,
+                y_pred,
+                average="weighted",
+                zero_division=0,
+                labels=all_classes,
             )
             f1_m = f1_score(
-                y_val, y_pred, average="macro", zero_division=0, labels=all_classes
+                y_val,
+                y_pred,
+                average="macro",
+                zero_division=0,
+                labels=all_classes,
             )
             prec = precision_score(
-                y_val, y_pred, average="weighted", zero_division=0, labels=all_classes
+                y_val,
+                y_pred,
+                average="weighted",
+                zero_division=0,
+                labels=all_classes,
             )
             rec = recall_score(
-                y_val, y_pred, average="weighted", zero_division=0, labels=all_classes
+                y_val,
+                y_pred,
+                average="weighted",
+                zero_division=0,
+                labels=all_classes,
             )
             cm = confusion_matrix(y_val, y_pred, labels=all_classes)
             logloss = log_loss(y_val, y_pred_proba, labels=all_classes)
@@ -385,7 +549,7 @@ class WESADClassifier:
             all_y_true.extend(y_val.tolist())
             all_y_pred.extend(y_pred.tolist())
 
-        # ── Aggregate results ──
+        # Aggregate results
         total_time = time.time() - start_time
         results = self._aggregate_results(
             all_fold_results, all_y_true, all_y_pred, total_time
@@ -450,6 +614,9 @@ class WESADClassifier:
                 "n_iter": self.n_iter,
                 "n_inner_cv": self.n_inner_cv,
                 "search_method": "RandomizedSearchCV",
+                "normalize": self.normalize,
+                "train_independent_only": self.train_independent_only,
+                "nan_threshold": self.nan_threshold,
             },
         }
 
