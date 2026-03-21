@@ -291,6 +291,15 @@ class FLConfig:
 
     n_conv_layers: int = 1
 
+    target_time: int | None = None
+    # Temporal dimension after adaptive pooling (the sequence length the
+    # LSTM reads).  If None, uses the per-device factory default:
+    #   wrist = 8  (constrained by w_eda branch)
+    #   chest = 5  (constrained by RESP branch)
+    # Must be set explicitly for window-length ablations (e.g. 10s window
+    # needs a lower target_time to avoid upsampling in adaptive pooling).
+    # See wesad_cnnlstm_model.py for valid values.
+
     n_classes: int = 2
 
     def __post_init__(self):
