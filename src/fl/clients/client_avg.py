@@ -35,7 +35,7 @@
 
 from __future__ import annotations
 
-from fl.clients.client_base import WESADClient
+from src.fl.clients.client_base import WESADClient
 
 
 # inherits WESADClient, adds nothing (useful for future extensibility though)

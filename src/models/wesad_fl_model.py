@@ -51,7 +51,8 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from wesad_cnnlstm_model import (
+
+from src.models.wesad_cnnlstm_model import (
     CNNLSTM,
     build_chest_model,
     build_wrist_model,
