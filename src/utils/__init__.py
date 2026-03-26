@@ -11,6 +11,7 @@ from .result_store import (
     FoldResultAccumulator,
     load_all_fold_results,
     load_fold_result,
+    print_cross_fold_summary,
     summarise_across_folds,
 )
 from .wesad_fl_dataset import (
@@ -31,6 +32,7 @@ __all__ = [
     "load_all_fold_results",
     "load_fold_result",
     "summarise_across_folds",
+    "print_cross_fold_summary",
     "FLClientDataManager",
     "FLFoldConfig",
     "build_fl_fold_datasets",

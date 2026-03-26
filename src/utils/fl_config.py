@@ -154,7 +154,7 @@ class FLConfig:
     device_type: str = "wrist"
     window_sec: float = 16.0
     label_mode: str = "binary"
-    windowed_dir: str = "data/dl_windowed/"
+    windowed_dir: str = "data/processed/wesad/dl_windowed/"
     signals_to_load: list[str] | None = None
 
     # Federation parameters
