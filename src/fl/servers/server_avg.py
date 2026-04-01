@@ -129,6 +129,10 @@ class FedAvgServer(WESADServer):
 
             budget.append(time.time() - round_start)
 
+        # Before final evaluation, broadcast the aggregated global model
+        # so clients are evaluated on the global model
+        self.send_full_models()
+
         # Final evaluation: clients hold their post-training parameters
         # (the global model after aggregation of the last round's uploads).
         # For FedAvg, all clients should produce identical results since
