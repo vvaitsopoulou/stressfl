@@ -175,6 +175,7 @@ class WESADHead(nn.Module):
             (batch, n_classes) — raw logits for CrossEntropyLoss.
         """
         # LSTM
+        self.lstm.flatten_parameters()  # suppress cuDNN fragmentation warning
         lstm_out, (h_n, c_n) = self.lstm(fused)
         # Use hidden state from last timestep of last layer
         last_hidden = h_n[-1]  # (batch, lstm_hidden)
