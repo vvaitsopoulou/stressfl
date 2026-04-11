@@ -592,8 +592,8 @@ def preprocess_fitbit_session(
 
     return {
         "features": features,
-        # "labels": labels,
-        # "phase_names": phase_names,
+        "labels": labels,
+        "phase_names": phase_names,
         "quality": quality,
         "timestamps": timestamps,
         "cal_mask": cal_mask,
