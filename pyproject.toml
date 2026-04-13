@@ -43,7 +43,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tqdm>=4.65.0",
     "python-dotenv>=1.0.0",
-    "click>=8.1.0",
+    "click>=8.3.2",
     "loguru>=0.7.0",
     # Added Biometric Libs
     "neurokit2>=0.2.7",
