@@ -204,11 +204,23 @@ class FLClientDataManager:
         }
 
         # Local training data (this subject's windows only)
+        # CRITICAL: if this client IS the test subject, we must exclude
+        # the non-overlapped windows from their local training set,
+        # because those non-overlapped windows ARE the test set.  If we
+        # don't, personalised FL methods (FedRep, FedBABU, PeFLL) train
+        # the local head on data that overlaps the test set and trivially
+        # memorise it (observed: F1=1.00 on S2 after only 5 FedRep rounds).
+        # FedAvg was not affected because its global model is aggregated
+        # across 14 clients, so per-subject memorisation gets averaged
+        # away.  But the fix applies here for all clients uniformly so
+        # FedAvg's numbers remain comparable going forward.
+        is_test_subject = subject_id == fold_config.test_subject
         self._train_dataset = WESADDLDataset(
             subject_ids=[subject_id],
             mode="train",
             noise_std=noise_std,
             scale_range=scale_range,
+            exclude_nonoverlapped=is_test_subject,
             **common_kwargs,
         )
 

@@ -122,6 +122,7 @@ class WESADDLDataset(Dataset):
         scale_range: tuple[float, float] = (0.9, 1.1),
         signals_to_load: list[str] | None = None,
         epsilon: float = 1e-8,
+        exclude_nonoverlapped: bool = False,
     ):
         assert mode in ("train", "val", "test"), f"Invalid mode: {mode}"
         assert device_type in ("chest", "wrist"), f"Invalid device: {device_type}"
@@ -133,6 +134,15 @@ class WESADDLDataset(Dataset):
         self.scale_range = scale_range
         self.signals_to_load = signals_to_load
         self.epsilon = epsilon
+        # When mode="train", if exclude_nonoverlapped=True we keep ONLY
+        # overlapped windows and drop the non-overlapped ones.  This is
+        # used in FL for the test subject's own training dataset, so that
+        # their local training windows are disjoint from their test set
+        # (which consists of non-overlapped windows).  Without this flag,
+        # personalised FL methods (FedRep, FedBABU, PeFLL) can trivially
+        # memorise the test windows via the local head (observed: F1=1.00
+        # on S2 after 5 rounds of FedRep).  No-op unless mode="train".
+        self.exclude_nonoverlapped = exclude_nonoverlapped
 
         # Load and concatenate windows from all requested subjects
         self.signal_names: list[str] = []  # populated on first subject load
@@ -182,10 +192,15 @@ class WESADDLDataset(Dataset):
         is_overlapped = np.array(is_overlapped)
 
         # Filter by mode
-        # Train: keep ALL windows (overlapped + independent)
+        # Train: keep ALL windows (overlapped + independent), UNLESS
+        #   exclude_nonoverlapped=True (used for the test-subject-as-FL-client
+        #   whose non-overlapped windows are the test set and must not
+        #   appear in their local training data).
         # Val/Test: keep ONLY non-overlapped (independent) windows
         if self.mode in ("val", "test"):
             keep_mask = ~is_overlapped
+        elif self.mode == "train" and self.exclude_nonoverlapped:
+            keep_mask = is_overlapped.astype(bool)
         else:
             keep_mask = np.ones(len(labels), dtype=bool)
 
