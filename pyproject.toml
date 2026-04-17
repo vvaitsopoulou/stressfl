@@ -48,7 +48,7 @@ dependencies = [
     # Added Biometric Libs
     "neurokit2>=0.2.7",
     "heartpy>=1.2.7",
-    "biosppy>=2.0.0",
+    "biosppy>=2.2.4",
     "h5py>=3.9.0",
 ]
 
