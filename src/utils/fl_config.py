@@ -269,7 +269,7 @@ class FLConfig:
 
     # Hardware
     device: str = "cuda"
-    num_workers: int = 4
+    num_workers: int = 8
     # Was 0 (single-threaded data loading).  With num_workers=0 and
     # per-window augmentation/normalisation in the Dataset, the main
     # Python thread becomes the bottleneck and starves the GPU
