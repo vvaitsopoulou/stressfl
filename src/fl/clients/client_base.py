@@ -137,51 +137,114 @@ class WESADClient:
         # timing
         self.train_time_cost = {"num_rounds": 0, "total_cost": 0.0}
 
+        # DataLoader caches
+        # In PFLIB's original code, load_train_data() creates a fresh
+        # DataLoader on every call.  For us that means a new DataLoader is
+        # built per client per round per phase (for FedRep: twice per round).
+        # When num_workers > 0, each fresh DataLoader also spawns and tears
+        # down worker processes, paying ~100 ms of startup cost per call.
+        # Over 15 clients x 100 rounds x 2 phases, that alone dominated
+        # wall-clock on the rented GPU (nvidia-smi showed 2% util, 29 MB
+        # allocated: the GPU was starved while Python built loaders).
+        # Solution: build one persistent DataLoader per split per client in
+        # __init__ and reuse it.  Scientifically equivalent (same dataset,
+        # same batch_size, same shuffling) just faster.
+        self._train_loader_cache: torch.utils.data.DataLoader | None = None
+        self._val_loader_cache: torch.utils.data.DataLoader | None = None
+        self._test_loader_cache: torch.utils.data.DataLoader | None = None
+
     # Data loading
-    # Mirrors PFLIB clientbase.py load_train_data() / load_test_data().
-    # Delegates to FLClientDataManager but wraps with collate_fn.
+    # Mirrors PFLIB clientbase.py load_train_data() / load_test_data()
+    # but caches the DataLoader to avoid worker-startup overhead.
+
+    def _make_loader(
+        self,
+        dataset,
+        batch_size: int,
+        shuffle: bool,
+        drop_last: bool,
+    ) -> torch.utils.data.DataLoader:
+        """Build a DataLoader with FL-tuned defaults.
+
+        num_workers >= 1 and persistent_workers=True are the key
+        performance settings.  Without them, the GPU is starved by the
+        main Python thread doing per-window normalisation and
+        augmentation serially.
+        """
+        nw = max(self.config.num_workers, 0)
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            collate_fn=_collate_fn,
+            num_workers=nw,
+            pin_memory=torch.cuda.is_available(),
+            persistent_workers=(nw > 0),
+        )
 
     def load_train_data(
         self, batch_size: int | None = None
     ) -> torch.utils.data.DataLoader:
         bs = batch_size or self.batch_size
-        return torch.utils.data.DataLoader(
-            self.data_manager._train_dataset,
-            batch_size=bs,
-            shuffle=True,
-            drop_last=True,
-            collate_fn=_collate_fn,
-            num_workers=self.config.num_workers,
-            pin_memory=torch.cuda.is_available(),
-        )
+        # Only cache the default-batch-size loader.  If the caller
+        # requests a non-default batch_size (rare, e.g. PeFLL's
+        # embedding batch), build a fresh loader.
+        if batch_size is not None and batch_size != self.batch_size:
+            return self._make_loader(
+                self.data_manager._train_dataset,
+                bs,
+                shuffle=True,
+                drop_last=True,
+            )
+        if self._train_loader_cache is None:
+            self._train_loader_cache = self._make_loader(
+                self.data_manager._train_dataset,
+                bs,
+                shuffle=True,
+                drop_last=True,
+            )
+        return self._train_loader_cache
 
     def load_test_data(
         self, batch_size: int | None = None
     ) -> torch.utils.data.DataLoader:
         bs = batch_size or self.batch_size
-        return torch.utils.data.DataLoader(
-            self.data_manager._test_dataset,
-            batch_size=bs,
-            shuffle=False,
-            drop_last=False,
-            collate_fn=_collate_fn,
-            num_workers=self.config.num_workers,
-            pin_memory=torch.cuda.is_available(),
-        )
+        if batch_size is not None and batch_size != self.batch_size:
+            return self._make_loader(
+                self.data_manager._test_dataset,
+                bs,
+                shuffle=False,
+                drop_last=False,
+            )
+        if self._test_loader_cache is None:
+            self._test_loader_cache = self._make_loader(
+                self.data_manager._test_dataset,
+                bs,
+                shuffle=False,
+                drop_last=False,
+            )
+        return self._test_loader_cache
 
     def load_val_data(
         self, batch_size: int | None = None
     ) -> torch.utils.data.DataLoader:
         bs = batch_size or self.batch_size
-        return torch.utils.data.DataLoader(
-            self.data_manager._val_dataset,
-            batch_size=bs,
-            shuffle=False,
-            drop_last=False,
-            collate_fn=_collate_fn,
-            num_workers=self.config.num_workers,
-            pin_memory=torch.cuda.is_available(),
-        )
+        if batch_size is not None and batch_size != self.batch_size:
+            return self._make_loader(
+                self.data_manager._val_dataset,
+                bs,
+                shuffle=False,
+                drop_last=False,
+            )
+        if self._val_loader_cache is None:
+            self._val_loader_cache = self._make_loader(
+                self.data_manager._val_dataset,
+                bs,
+                shuffle=False,
+                drop_last=False,
+            )
+        return self._val_loader_cache
 
     # Parameter synchronisation
     def set_parameters(self, base_model: nn.Module):
@@ -274,16 +337,19 @@ class WESADClient:
 
         for _epoch in range(self.local_epochs):
             for signals, labels in trainloader:
-                # Move to device
-                signals = {k: v.to(self.device) for k, v in signals.items()}
-                labels = labels.to(self.device)
+                # Move to device (non_blocking=True for async transfers,
+                # only effective because the loaders use pin_memory=True)
+                signals = {
+                    k: v.to(self.device, non_blocking=True) for k, v in signals.items()
+                }
+                labels = labels.to(self.device, non_blocking=True)
 
                 # Forward
                 output = self.model(signals)
                 loss = self.loss(output, labels)
 
                 # Backward
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 self.optimizer.step()
 
@@ -335,10 +401,12 @@ class WESADClient:
         total_loss = 0.0
         num_samples = 0
 
-        with torch.no_grad():
+        with torch.inference_mode():
             for signals, labels in trainloader:
-                signals = {k: v.to(self.device) for k, v in signals.items()}
-                labels = labels.to(self.device)
+                signals = {
+                    k: v.to(self.device, non_blocking=True) for k, v in signals.items()
+                }
+                labels = labels.to(self.device, non_blocking=True)
 
                 output = self.model(signals)
                 loss = self.loss(output, labels)
@@ -367,6 +435,10 @@ class WESADClient:
         """Load a PyTorch object from disk.
 
         Mirrors PFLIB_clientbase.py load_item().
+
+        Uses weights_only=True to prevent arbitrary code execution
+        during unpickling (bandit B614 / CWE-502).
+        Matches the pattern in wesad_cnnlstm_evaluate.py.
         """
         if item_path is None:
             item_path = self.config.experiment_name

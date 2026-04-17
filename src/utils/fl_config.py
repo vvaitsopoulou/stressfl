@@ -269,7 +269,17 @@ class FLConfig:
 
     # Hardware
     device: str = "cuda"
-    num_workers: int = 0
+    num_workers: int = 4
+    # Was 0 (single-threaded data loading).  With num_workers=0 and
+    # per-window augmentation/normalisation in the Dataset, the main
+    # Python thread becomes the bottleneck and starves the GPU
+    # (observed: 2% GPU utilisation, 29 MB allocated on Vast.ai RTX 4080).
+    # num_workers=4 + persistent_workers=True (see client_base.py
+    # _make_loader) keeps the workers alive across rounds and allows
+    # several windows to be loaded/augmented in parallel, feeding the
+    # GPU continuously.  On CPU-only runs this also helps slightly by
+    # overlapping I/O with compute.  Set lower if running on a cloud
+    # instance with very few vCPUs.
 
     # Augmentation
     # These match wesad_cnnlstm_train.py and wesad_dl_dataset.py exactly.

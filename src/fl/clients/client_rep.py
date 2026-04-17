@@ -172,13 +172,15 @@ class FedRepClient(WESADClient):
 
         for _epoch in range(self.plocal_epochs):
             for signals, labels in trainloader:
-                signals = {k: v.to(self.device) for k, v in signals.items()}
-                labels = labels.to(self.device)
+                signals = {
+                    k: v.to(self.device, non_blocking=True) for k, v in signals.items()
+                }
+                labels = labels.to(self.device, non_blocking=True)
 
                 output = self.model(signals)
                 loss = self.loss(output, labels)
 
-                self.optimizer_per.zero_grad()
+                self.optimizer_per.zero_grad(set_to_none=True)
                 loss.backward()
                 self.optimizer_per.step()
 
@@ -197,13 +199,15 @@ class FedRepClient(WESADClient):
 
         for _epoch in range(self.local_epochs):
             for signals, labels in trainloader:
-                signals = {k: v.to(self.device) for k, v in signals.items()}
-                labels = labels.to(self.device)
+                signals = {
+                    k: v.to(self.device, non_blocking=True) for k, v in signals.items()
+                }
+                labels = labels.to(self.device, non_blocking=True)
 
                 output = self.model(signals)
                 loss = self.loss(output, labels)
 
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 self.optimizer.step()
 

@@ -148,7 +148,7 @@ def evaluate_client(
     all_preds = []
     all_labels = []
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in dataloader:
             # Handle dict-of-signals input (WESADDLDataset format)
             if isinstance(batch, (list, tuple)) and len(batch) == 2:
@@ -159,13 +159,15 @@ def evaluate_client(
                     f"Expected (signals_dict, labels) tuple."
                 )
 
-            # Move signals to device
+            # Move signals to device (non_blocking benefits from pin_memory)
             if isinstance(signals, dict):
-                signals = {k: v.to(device) for k, v in signals.items()}
+                signals = {
+                    k: v.to(device, non_blocking=True) for k, v in signals.items()
+                }
             else:
-                signals = signals.to(device)
+                signals = signals.to(device, non_blocking=True)
 
-            labels = labels.to(device)
+            labels = labels.to(device, non_blocking=True)
 
             # Forward pass
             logits = model(signals)

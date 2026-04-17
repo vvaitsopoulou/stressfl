@@ -174,8 +174,15 @@ class WESADHead(nn.Module):
         torch.Tensor
             (batch, n_classes) — raw logits for CrossEntropyLoss.
         """
+        # Flatten LSTM parameters for cuDNN's fused kernel.
+        # Without this, cuDNN emits the "RNN module weights are not part
+        # of a single contiguous chunk" warning and falls back to a slower
+        # path.  After copy.deepcopy (which every client does in __init__)
+        # the underlying storage is no longer contiguous, so we re-flatten
+        # before every forward pass.  This is a no-op on CPU.
+        self.lstm.flatten_parameters()
+
         # LSTM
-        self.lstm.flatten_parameters()  # suppress cuDNN fragmentation warning
         lstm_out, (h_n, c_n) = self.lstm(fused)
         # Use hidden state from last timestep of last layer
         last_hidden = h_n[-1]  # (batch, lstm_hidden)
