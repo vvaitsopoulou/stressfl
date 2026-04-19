@@ -133,32 +133,38 @@ class FedAvgServer(WESADServer):
         # so clients are evaluated on the global model
         self.send_full_models()
 
-        # Final evaluation: clients hold their post-training parameters
-        # (the global model after aggregation of the last round's uploads).
-        # For FedAvg, all clients should produce identical results since
-        # they all received the same global model and trained independently.
-        # Any per-client variance comes from the eval being on different
-        # subjects' test data, not from model differences.
+        # Final training-client monitoring evaluation.  All 13 clients
+        # share the same global model under FedAvg, so per-client
+        # variance reflects differences in each client's test data.
         print(
-            f"\n  ─── Final evaluation (after round {self.config.global_rounds - 1}) ───"
+            f"\n  ─── Final monitoring evaluation "
+            f"(after round {self.config.global_rounds - 1}) ───"
         )
         final_metrics = self.evaluate(round_num=self.config.global_rounds)
 
+        # Held-out test subject evaluation WITHOUT calibration.
+        # FedAvg's branch in evaluate_test_subject_with_calibration()
+        # is a no-op: the global model is evaluated directly on the
+        # 80% evaluation split.  THIS IS THE LOSO FOLD METRIC.
+        test_subject_metrics = self.evaluate_test_subject_with_calibration()
+        self.results.set_test_subject_metrics(test_subject_metrics)
+
         # Summary
-        if final_metrics.test_subject_metrics is not None:
-            test_f1 = final_metrics.test_subject_metrics.macro_f1
-            test_acc = final_metrics.test_subject_metrics.accuracy
-            test_sr = final_metrics.test_subject_metrics.stress_recall
-            print(
-                f"\n  ═══ FedAvg Final Results (fold S{self.fold_config.test_subject}) ═══"
-            )
-            print(f"  Test subject F1:            {test_f1:.4f}")
-            print(f"  Test subject Accuracy:      {test_acc:.4f}")
-            print(f"  Test subject Stress Recall: {test_sr:.4f}")
-            print(
-                f"  Mean client F1:             {final_metrics.mean_macro_f1:.4f} "
-                f"± {final_metrics.std_macro_f1:.4f}"
-            )
+        print(
+            f"\n  ═══ FedAvg Final Results "
+            f"(fold S{self.fold_config.test_subject}) ═══"
+        )
+        print("  Held-out test subject (LOSO fold metric):")
+        print(f"    macro-F1:       {test_subject_metrics.macro_f1:.4f}")
+        print(f"    accuracy:       {test_subject_metrics.accuracy:.4f}")
+        print(f"    stress recall:  {test_subject_metrics.stress_recall:.4f}")
+        print(f"    stress F1:      {test_subject_metrics.stress_f1:.4f}")
+        print(f"    n_eval samples: {test_subject_metrics.n_samples}")
+        print("  Training-client monitoring (13 clients):")
+        print(
+            f"    mean macro-F1:  {final_metrics.mean_macro_f1:.4f} "
+            f"± {final_metrics.std_macro_f1:.4f}"
+        )
 
         if budget:
             avg_time = sum(budget) / len(budget)
