@@ -14,25 +14,36 @@
 #
 # 1. Validation Strategy: ROTATING VALIDATION (one per fold)
 #
-#    For each LOSO fold with test subject S, the validation subject is
-#    selected by deterministic rotation: the subject immediately after S
+#    For each LOSO fold with test subject S_t, the validation subject is
+#    selected by deterministic rotation: the subject immediately after S_t
 #    in the sorted subject list (wrapping around).  This means every
 #    subject serves as validation in exactly one fold, so no subject is
 #    systematically underrepresented in training.
 #
-#    This is already implemented in wesad_dl_dataset.build_loso_datasets()
+# 2. Federation participation: TEST SUBJECT IS HELD OUT
 #
-# 2. Federation Participation  : TEST SUBJECT PARTICIPATES
+#    The test subject S_t does NOT participate in federated training.
+#    Federation proceeds across the remaining 14 subjects.  After
+#    federation completes, S_t's data is split into a calibration set
+#    (20%, used to personalise the local head) and an evaluation set
+#    (80%, used to report the LOSO fold metric).  The split is stratified
+#    by contiguous condition block so both sets preserve class balance.
 #
-#    The test subject participates in federated training as a regular
-#    client (receives global base, trains locally, uploads base updates).
-#    At evaluation time, the test subject is evaluated using their
-#    personalised model (global base + local head for FedRep, personal
-#    model for Ditto, hypernetwork-generated params for PeFLL, etc.).
+#    This held-out-with-calibration protocol is established in both the
+#    FL literature (Collins et al. 2021 "Generalization to new clients",
+#    Chen et al. 2020 FedHealth two-step paradigm) and the WESAD-specific
+#    personalisation literature.  It prevents the local-head memorisation
+#    that occurs when the test subject's overlapped training windows
+#    share signal with their non-overlapped test windows.
 #
-#    This is the proper PFL evaluation regime (Collins et al. 2021,
-#    Li et al. 2021) and is used uniformly for ALL methods, including
-#    FedAvg and FedProx baselines.
+#    All FL methods in this codebase use this unified protocol:
+#      - FedAvg   : no calibration; evaluate global model on eval set
+#      - FedRep   : fresh random head, train on calibration set for K
+#                   epochs with base frozen, evaluate on eval set
+#      - FedBABU  : identical to FedRep (post-fed fine-tuning is its design)
+#      - PeFLL    : hypernet generates head from calibration embedding,
+#                   evaluate on eval set
+#
 
 
 from __future__ import annotations
@@ -82,7 +93,24 @@ class FLFoldConfig:
     train_subjects: list[int] | None = None
 
     def __post_init__(self):
-        """Compute train_subjects and val_subject if not provided."""
+        """Compute train_subjects and val_subject if not provided.
+
+        NEW SEMANTICS (held-out-with-calibration protocol):
+          - test_subject is NOT included in train_subjects.
+          - val_subject is NOT included in train_subjects either; they
+            are held out as a validation-only source.  This matches the
+            centralised training design (wesad_cnnlstm_train.py) and
+            avoids the minor leakage that would arise from using the same
+            subject's overlapped windows in training while their
+            non-overlapped windows drive LR scheduling / early-stopping.
+          - Federation therefore runs across 13 training subjects.
+
+        Participation counts per fold:
+          - 1 test subject (held out, calibration + evaluation after fed)
+          - 1 val subject  (held out for LR scheduling / eval monitoring)
+          - 13 training subjects (federation participants)
+          total: 15 subjects, each serving each role in exactly one fold.
+        """
         # Guard: val_subject must not equal test_subject (data leakage)
         if self.val_subject is not None and self.val_subject == self.test_subject:
             raise ValueError(
@@ -102,13 +130,23 @@ class FLFoldConfig:
                 self.val_subject = remaining[0]
 
         if self.train_subjects is None:
+            # 13 training participants: all subjects EXCEPT test and val.
             self.train_subjects = [s for s in remaining if s != self.val_subject]
 
-        # as per our decisiontest subject is INCLUDED in train_subjects
-        # (participates in federation, evaluates on local personalised model)
-        if self.test_subject not in self.train_subjects:
-            self.train_subjects.append(self.test_subject)
-            self.train_subjects.sort()
+        # Sanity: test subject must never appear in train_subjects
+        # under the held-out protocol.
+        if self.test_subject in self.train_subjects:
+            raise ValueError(
+                f"test_subject ({self.test_subject}) must not appear in "
+                f"train_subjects under the held-out-with-calibration "
+                f"protocol.  Got train_subjects={self.train_subjects}."
+            )
+        if self.val_subject in self.train_subjects:
+            raise ValueError(
+                f"val_subject ({self.val_subject}) must not appear in "
+                f"train_subjects under the held-out-with-calibration "
+                f"protocol.  Got train_subjects={self.train_subjects}."
+            )
 
     @property
     def num_clients(self) -> int:
@@ -203,49 +241,44 @@ class FLClientDataManager:
             "signals_to_load": signals_to_load,
         }
 
-        # Local training data (this subject's windows only)
-        # CRITICAL: if this client IS the test subject, we must exclude
-        # the non-overlapped windows from their local training set,
-        # because those non-overlapped windows ARE the test set.  If we
-        # don't, personalised FL methods (FedRep, FedBABU, PeFLL) train
-        # the local head on data that overlaps the test set and trivially
-        # memorise it (observed: F1=1.00 on S2 after only 5 FedRep rounds).
-        # FedAvg was not affected because its global model is aggregated
-        # across 14 clients, so per-subject memorisation gets averaged
-        # away.  But the fix applies here for all clients uniformly so
-        # FedAvg's numbers remain comparable going forward.
-        is_test_subject = subject_id == fold_config.test_subject
+        # Local training data (this subject's windows only).
+        # Under the held-out protocol, the test subject is NOT an FL
+        # client, so this code path is only reached for training
+        # subjects.  Their full set of overlapped + non-overlapped
+        # windows is used for local training (standard Collins et al.
+        # 2021 FedRep setup).
         self._train_dataset = WESADDLDataset(
             subject_ids=[subject_id],
             mode="train",
             noise_std=noise_std,
             scale_range=scale_range,
-            exclude_nonoverlapped=is_test_subject,
             **common_kwargs,
         )
 
         # Validation data
-        # If this client IS the validation subject, their val data is their
-        # own non-overlapped windows.  Otherwise, val data comes from the
-        # fold's designated val subject.
+        # val_subject is held out of federation under the new protocol,
+        # so it's never the same as subject_id (this client).  Every
+        # training client uses the same shared val subject for
+        # LR scheduling / early-stopping metrics.
         assert fold_config.val_subject is not None
-        val_subject_for_this_client: int = (
-            subject_id
-            if subject_id == fold_config.val_subject
-            else fold_config.val_subject
+        assert subject_id != fold_config.val_subject, (
+            f"val_subject {fold_config.val_subject} should never be "
+            f"instantiated as an FL client under the held-out protocol"
         )
 
         self._val_dataset = WESADDLDataset(
-            subject_ids=[val_subject_for_this_client],
+            subject_ids=[fold_config.val_subject],
             mode="val",
             noise_std=0.0,
             scale_range=(1.0, 1.0),
             **common_kwargs,
         )
 
-        # ── Test data (this subject's non-overlapped windows) ──
-        # Only meaningful when subject_id == fold_config.test_subject,
-        # but we always create it for uniform interface.
+        # Test data is removed from the per-client interface because
+        # under the held-out protocol, no FL client is the test subject.
+        # Test-subject evaluation is handled separately via
+        # build_test_subject_splits() + the server's calibration step.
+        # Keeping an empty placeholder for legacy compatibility.
         self._test_dataset = WESADDLDataset(
             subject_ids=[subject_id],
             mode="test",
@@ -379,14 +412,206 @@ def build_fl_fold_datasets(
         f"({fold_config.all_participating_subjects})"
     )
     for sid, mgr in managers.items():
-        role = ""
-        if sid == fold_config.test_subject:
-            role = " [TEST]"
-        elif sid == fold_config.val_subject:
-            role = " [VAL-source]"
+        # Test subject is not an FL client under held-out protocol; only
+        # the val_subject tag appears here now.
+        role = " [VAL-source]" if sid == fold_config.val_subject else ""
         print(
             f"      S{sid}{role}: {mgr.train_samples} train windows, "
             f"dist={mgr.get_label_distribution()}"
         )
 
     return managers
+
+
+# Test-subject calibration / evaluation split
+
+
+def build_test_subject_splits(
+    test_subject: int,
+    windowed_dir: str = "data/dl_windowed/",
+    device_type: str = "wrist",
+    window_sec: float = 16.0,
+    label_map: dict | None = None,
+    signals_to_load: list[str] | None = None,
+    calibration_fraction: float = 0.20,
+    verbose: bool = True,
+) -> tuple[WESADDLDataset, WESADDLDataset]:
+    """Split the test subject's non-overlapped windows into calibration
+    and evaluation sets, stratified by contiguous condition block.
+
+    Protocol (Collins et al. 2021 held-out client evaluation; see
+    FIX_PFL_PLAN):
+      - Load only the test subject's non-overlapped windows (mode=test).
+      - Group consecutive windows into "condition blocks": a block is a
+        maximal contiguous run of windows with the same label (in the
+        order they were recorded, which is the WESAD protocol order
+        baseline -> stress -> amusement -> ... ).
+      - From each block, take the first calibration_fraction (default
+        20%) of windows as calibration, and the remaining
+        (1 - calibration_fraction) as evaluation.
+      - Return (calibration_dataset, evaluation_dataset).
+
+    The split is TEMPORAL (chronological) within each block and
+    STRATIFIED across blocks, so both sets preserve class proportions
+    while also preserving the temporal structure (calibration windows
+    come from the first moments of each phase, evaluation windows from
+    later moments).  Because we use non-overlapped windows only, the
+    two sets have no signal overlap: each 16-s window's samples are
+    disjoint from every other window's samples in the same subject.
+
+    Parameters:
+    test_subject : int
+        Held-out subject's ID.
+    windowed_dir : str
+        Root of the windowed data tree.
+    device_type : str
+        "chest" or "wrist".
+    window_sec : float
+        Window length used during windowing.
+    label_map : dict | None
+        Label mapping.  Defaults to LABEL_MAP_BINARY.
+    signals_to_load : list[str] | None
+        Specific signals.  None = all.
+    calibration_fraction : float
+        Fraction of each condition block to allocate to the calibration
+        set.  Default 0.20 (matches the KD plan and Cross_Modal_KD plan).
+    verbose : bool
+        If True, print a summary of the split.
+
+    Returns:
+    (calibration_dataset, evaluation_dataset) : tuple[WESADDLDataset, WESADDLDataset]
+        Two datasets over disjoint subsets of the test subject's
+        non-overlapped windows.  Both use mode="test" (no augmentation,
+        no noise; only instance Z-score normalisation).
+    """
+    import numpy as np
+
+    from ..data.wesad_dl_dataset import WESADDLDataset
+
+    if label_map is None:
+        label_map = LABEL_MAP_BINARY
+
+    # Step 1: load the test subject's non-overlapped windows in
+    # recording order, so we can extract per-window timing and labels
+    # to plan the block-stratified split.
+    full = WESADDLDataset(
+        subject_ids=[test_subject],
+        windowed_dir=windowed_dir,
+        device_type=device_type,
+        window_sec=window_sec,
+        mode="test",
+        label_map=label_map,
+        noise_std=0.0,
+        scale_range=(1.0, 1.0),
+        signals_to_load=signals_to_load,
+    )
+
+    if len(full) == 0:
+        raise ValueError(
+            f"build_test_subject_splits: no non-overlapped windows "
+            f"found for S{test_subject}"
+        )
+
+    labels = full._labels  # mapped integer labels
+    start_secs = full.get_start_sec()
+    orig_idx = full.get_original_indices()
+
+    # Step 2: sort windows chronologically (they should already be,
+    # but make it explicit for safety).
+    order = np.argsort(start_secs, kind="stable")
+    labels = labels[order]
+    start_secs = start_secs[order]
+    orig_idx = orig_idx[order]
+
+    # Step 3: identify contiguous condition blocks.  A block ends when
+    # the label changes between consecutive windows.
+    block_boundaries = np.concatenate(
+        [[0], np.where(np.diff(labels) != 0)[0] + 1, [len(labels)]]
+    )  # e.g. [0, 34, 79, 131] for three blocks of sizes 34, 45, 52
+
+    calib_orig: list[int] = []
+    eval_orig: list[int] = []
+    block_report: list[tuple[int, int, int, int]] = []  # (label, start, cal_n, eval_n)
+
+    for bi in range(len(block_boundaries) - 1):
+        lo = block_boundaries[bi]
+        hi = block_boundaries[bi + 1]
+        block_len = hi - lo
+        block_label = int(labels[lo])
+        # Ceil so small blocks still contribute at least 1 calibration window
+        n_calib = max(1, int(np.ceil(block_len * calibration_fraction)))
+        n_calib = min(n_calib, block_len - 1) if block_len > 1 else block_len
+        n_eval = block_len - n_calib
+
+        # First n_calib chronologically -> calibration
+        calib_orig.extend(orig_idx[lo : lo + n_calib].tolist())
+        # Remaining -> evaluation
+        if n_eval > 0:
+            eval_orig.extend(orig_idx[lo + n_calib : hi].tolist())
+
+        block_report.append((block_label, block_len, n_calib, n_eval))
+
+    calib_orig_arr = np.array(sorted(calib_orig), dtype=np.int64)
+    eval_orig_arr = np.array(sorted(eval_orig), dtype=np.int64)
+
+    # Sanity: no overlap between the two sets
+    overlap = np.intersect1d(calib_orig_arr, eval_orig_arr)
+    if overlap.size > 0:
+        raise RuntimeError(
+            f"build_test_subject_splits: calibration and evaluation "
+            f"sets overlap on window indices {overlap.tolist()[:5]}..."
+        )
+
+    # Step 4: construct the two datasets using window_indices filtering.
+    calibration_dataset = WESADDLDataset(
+        subject_ids=[test_subject],
+        windowed_dir=windowed_dir,
+        device_type=device_type,
+        window_sec=window_sec,
+        mode="test",  # no augmentation
+        label_map=label_map,
+        noise_std=0.0,
+        scale_range=(1.0, 1.0),
+        signals_to_load=signals_to_load,
+        window_indices={test_subject: calib_orig_arr},
+    )
+    evaluation_dataset = WESADDLDataset(
+        subject_ids=[test_subject],
+        windowed_dir=windowed_dir,
+        device_type=device_type,
+        window_sec=window_sec,
+        mode="test",
+        label_map=label_map,
+        noise_std=0.0,
+        scale_range=(1.0, 1.0),
+        signals_to_load=signals_to_load,
+        window_indices={test_subject: eval_orig_arr},
+    )
+
+    if verbose:
+        print(
+            f"\n  Test-subject split (S{test_subject}, "
+            f"calibration_fraction={calibration_fraction:.2f})"
+        )
+        print(f"    Total non-overlapped windows: {len(full)}")
+        print(
+            f"    Calibration windows: {len(calibration_dataset)} "
+            f"({100*len(calibration_dataset)/max(len(full),1):.1f}%)"
+        )
+        print(
+            f"    Evaluation windows:  {len(evaluation_dataset)} "
+            f"({100*len(evaluation_dataset)/max(len(full),1):.1f}%)"
+        )
+        print(
+            f"    Calibration class distribution: "
+            f"{calibration_dataset.get_label_distribution()}"
+        )
+        print(
+            f"    Evaluation  class distribution: "
+            f"{evaluation_dataset.get_label_distribution()}"
+        )
+        print("    Condition blocks (label, length, cal, eval):")
+        for lbl, blen, ncal, neval in block_report:
+            print(f"      label={lbl}: n={blen}  cal={ncal}  eval={neval}")
+
+    return calibration_dataset, evaluation_dataset
