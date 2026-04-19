@@ -1,10 +1,10 @@
 # PeFLL server: joint training of embedding network + hypernetwork.
 #
 # The server jointly trains two networks:
-#   - EmbedNet: maps client data → client embedding
-#   - HyperNet: maps client embedding → personalised head parameters
+#   - EmbedNet: maps client data -> client embedding
+#   - HyperNet: maps client embedding -> personalised head parameters
 #
-# The training loop is fundamentally different from FedAvg/FedRep
+# The training loop is fundamentally different from FedAvg/FedRep:
 # instead of clients training locally and uploading model updates,
 # the server generates personalised parameters for each client,
 # evaluates them on client data, and backpropagates through the
@@ -13,37 +13,70 @@
 # Adapts from:
 #   - PeFLL train.py                : the joint training loop
 #   - PeFLL models.py EmbedHyper    : the combined embed+hyper module
-#   - server_base.py                : our WESADServer base class
+#   - server_base.py                : our WESADServer base class + the
+#                                     evaluate_test_subject_with_calibration
+#                                     entry point (overridden here for
+#                                     hypernet-based head generation)
 #
 # THE PEFLL TRAINING LOOP (Scott et al. 2024)
 #
 # Each round:
 #   1. Sample a batch of data from each client's local DataLoader
 #   2. Compute client embeddings: d_i = EmbedNet(batch_i)
-#   3. Generate personalised head params: θ_i = HyperNet(d_i)
-#   4. For each client: load θ_i into client's head, compute loss
+#   3. Generate personalised head params: theta_i = HyperNet(d_i)
+#   4. For each client: load theta_i into client's head, compute loss
 #      on a SEPARATE batch (not the embedding batch)
 #   5. Sum losses across clients, backpropagate through:
-#      loss → head params → HyperNet → EmbedNet
+#      loss -> head params -> HyperNet -> EmbedNet
 #   6. Update EmbedNet + HyperNet parameters via optimizer
 #   7. The CNN base is trained separately (FedAvg-style aggregation)
+#
+# HELD-OUT TEST SUBJECT EVALUATION (LOSO metric)
+#
+# PeFLL's personalisation mechanism is the hypernetwork itself -
+# there is NO gradient-based calibration step on the held-out subject.
+# Instead:
+#   1. Build the same 20/80 per-condition-block temporal split used
+#      for all other methods.
+#   2. Use ALL calibration windows as the embedding batch (single
+#      forward pass, mean-pooled over the sample dimension for
+#      permutation invariance per Scott et al. 2024). Using all
+#      windows minimises embedding variance vs the 32-sample stochastic
+#      estimate used during training.
+#   3. Feed the embedding through the hypernetwork to generate the
+#      held-out subject's personalised head parameters.
+#   4. Load those params into a deep-copy of the final global model
+#      (leaves self.global_model untouched for save_global_model).
+#   5. Evaluate on the 80% evaluation split.
+#
+# This is fair vs FedAvg/FedRep/FedBABU: all four methods are evaluated
+# on the SAME 80% partition of the held-out subject, using whatever
+# calibration mechanism is native to each method (none for FedAvg, K
+# gradient steps for FedRep/FedBABU, hypernet-generation for PeFLL).
 #
 # SCIENTIFIC CONTEXT
 #
 # Scott et al. 2024 (ICLR): "Personalized Federated Learning by
 # Learning to Learn"
-#   - Achieves state-of-the-art in low-data regimes which means it is perfectly suited to the wesad dataset
-#   - Generalises to unseen future clients (PAC-Bayesian)
+#   - Achieves state-of-the-art in low-data regimes (well suited to
+#     the WESAD dataset's short-duration biosignal windows)
+#   - Generalises to unseen future clients (PAC-Bayesian guarantees)
 
 from __future__ import annotations
 
+import copy
 import time
 
 import torch
+from torch.utils.data import DataLoader
 
 from ...utils.fl_config import FLConfig
-from ...utils.metrics import evaluate_client
-from ...utils.wesad_fl_dataset import FLClientDataManager, FLFoldConfig
+from ...utils.metrics import ClientMetrics, evaluate_client
+from ...utils.wesad_fl_dataset import (
+    FLClientDataManager,
+    FLFoldConfig,
+    build_test_subject_splits,
+)
 from ..servers.server_base import WESADServer
 from .client_pefll import PeFLLClient
 from .wesad_embednet import WESADEmbedNet
@@ -141,7 +174,10 @@ class PeFLLServer(WESADServer):
         print(f"  Local epochs:     {self.config.local_epochs} (base)")
         print(f"  Embedding dim:    {self.config.embedding_dim}")
         print(f"  HyperNet hidden:  {self.config.hypernet_hidden}")
-        print(f"  Clients:          {len(self.clients)}")
+        print(
+            f"  Clients:          {len(self.clients)} (training only; "
+            f"test subject S{self.fold_config.test_subject} excluded)"
+        )
 
         budget = []
 
@@ -155,9 +191,9 @@ class PeFLLServer(WESADServer):
                 self._generate_and_load_heads()
                 self.evaluate(round_num=round_num)
 
-            # 2. HYPERNETWORK TRAIING STEP
+            # 2. HYPERNETWORK TRAINING STEP
             # For each client:
-            #   a) Get embedding batch → compute embedding
+            #   a) Get embedding batch -> compute embedding
             #   b) Generate head params from embedding
             #   c) Compute loss using functional_call with generated params
             # Sum losses, backprop through HyperNet + EmbedNet
@@ -201,31 +237,52 @@ class PeFLLServer(WESADServer):
 
             budget.append(time.time() - round_start)
 
-        # Final evaluation
+        # Final training-client monitoring evaluation.
+        # Regenerate heads on the final global base so the 13 training
+        # clients are evaluated with their up-to-date personalised models.
         self._generate_and_load_heads()
         print(
-            f"\n  ─── Final evaluation (after round {self.config.global_rounds - 1}) ───"
+            f"\n  ─── Final monitoring evaluation "
+            f"(after round {self.config.global_rounds - 1}) ───"
         )
         final_metrics = self.evaluate(round_num=self.config.global_rounds)
 
+        # LOSO FOLD METRIC - held-out test subject evaluation via hypernet.
+        # Calls the PeFLL override of evaluate_test_subject_with_calibration
+        # (below), which:
+        #   1. Builds the 20/80 per-condition-block split of S{test}.
+        #   2. Uses ALL calibration windows as the embedding batch.
+        #   3. Generates head params via embed_net -> hyper_net.
+        #   4. Loads them into a deep-copy of self.global_model.
+        #   5. Evaluates on the 80% evaluation split.
+        # No gradient calibration - the hypernet IS the calibration
+        # mechanism.  Same 80% partition as FedAvg/FedRep/FedBABU for
+        # fair cross-method comparison.
+        test_subject_metrics = self.evaluate_test_subject_with_calibration()
+        self.results.set_test_subject_metrics(test_subject_metrics)
+
         # Summary
-        if final_metrics.test_subject_metrics is not None:
-            test_f1 = final_metrics.test_subject_metrics.macro_f1
-            test_acc = final_metrics.test_subject_metrics.accuracy
-            print(
-                f"\n  ═══ PeFLL Final Results (fold S{self.fold_config.test_subject}) ═══"
-            )
-            print(f"  Test subject F1:       {test_f1:.4f}")
-            print(f"  Test subject Accuracy: {test_acc:.4f}")
-            print(
-                f"  Mean client F1:        {final_metrics.mean_macro_f1:.4f} "
-                f"± {final_metrics.std_macro_f1:.4f}"
-            )
+        print(
+            f"\n  ═══ PeFLL Final Results "
+            f"(fold S{self.fold_config.test_subject}) ═══"
+        )
+        print("  Held-out test subject (LOSO fold metric):")
+        print(f"    macro-F1:       {test_subject_metrics.macro_f1:.4f}")
+        print(f"    accuracy:       {test_subject_metrics.accuracy:.4f}")
+        print(f"    stress recall:  {test_subject_metrics.stress_recall:.4f}")
+        print(f"    stress F1:      {test_subject_metrics.stress_f1:.4f}")
+        print(f"    n_eval samples: {test_subject_metrics.n_samples}")
+        print("  Training-client monitoring (13 clients):")
+        print(
+            f"    mean macro-F1:  {final_metrics.mean_macro_f1:.4f} "
+            f"± {final_metrics.std_macro_f1:.4f}"
+        )
 
         if budget:
             avg_time = sum(budget) / len(budget)
-            print(f"  Average round time: {avg_time:.2f}s")
-            print(f"  Total training time: {sum(budget):.1f}s")
+            total_time = sum(budget)
+            print(f"  Average round time:  {avg_time:.2f}s")
+            print(f"  Total training time: {total_time:.1f}s")
 
         self.save_results()
         self.save_global_model()
@@ -235,8 +292,8 @@ class PeFLLServer(WESADServer):
     def _compute_client_hyper_loss(self, client: PeFLLClient) -> torch.Tensor | None:
         """Compute the differentiable loss for one client.
 
-        Gradient flows: loss → model output → generated head params →
-        HyperNet → EmbedNet.
+        Gradient flows: loss -> model output -> generated head params ->
+        HyperNet -> EmbedNet.
 
         Uses torch.func.functional_call to apply the generated head
         parameters differentiably.
@@ -269,19 +326,27 @@ class PeFLLServer(WESADServer):
         # The base forward is run normally (shared CNN features),
         # then the head forward uses the generated parameters.
 
-        # Run base forward (detached from hyper gradients as thebase has
-        # its own training via FedAvg aggregation)
+        # Run base forward (detached from hyper gradients; the base has
+        # its own training via FedAvg-style aggregation).
         with torch.no_grad():
             fused = client.model.base(train_signals)
 
-        # Run head forward with generated parameters (differentiable)
-        head_output = torch.func.functional_call(
-            client.model.head,
-            generated_params,
-            (fused,),
-        )
-
-        loss = client.loss(head_output, train_labels)
+        # cuDNN's fused LSTM kernel requires .train() mode for its
+        # backward pass.  self.evaluate() (called earlier in the round)
+        # left the head in eval mode.  Flip to train mode for the
+        # differentiable forward, then restore eval mode for safety.
+        was_training = client.model.head.training
+        client.model.head.train()
+        try:
+            head_output = torch.func.functional_call(
+                client.model.head,
+                generated_params,
+                (fused,),
+            )
+            loss = client.loss(head_output, train_labels)
+        finally:
+            if not was_training:
+                client.model.head.eval()
 
         return loss
 
@@ -331,7 +396,178 @@ class PeFLLServer(WESADServer):
         for param in client.model.head.parameters():
             param.requires_grad = True
 
-    # Unseen client experiment
+    # Held-out test subject evaluation (LOSO)
+
+    def evaluate_test_subject_with_calibration(self) -> ClientMetrics:
+        """PeFLL's held-out LOSO evaluation: hypernet-based head generation.
+
+        Overrides WESADServer.evaluate_test_subject_with_calibration().
+        Because PeFLL personalises via the hypernetwork rather than
+        gradient descent on the head, this method does NOT call
+        _calibrate_head() or _reset_head_weights().  Instead it:
+
+        1. Builds the 20/80 per-condition-block temporal split of the
+           held-out subject's non-overlapped windows (same helper used
+           for all methods).
+        2. Assembles a SINGLE batch containing ALL calibration windows
+           (~28 windows at 16s non-overlapped).  Using the full set
+           rather than a 32-sample stochastic subset minimises the
+           embedding's estimator variance; the EmbedNet is permutation-
+           invariant via mean-pooling (Scott et al. 2024), so the
+           embedding is well-defined for any batch size.
+        3. Passes the calibration batch through embed_net to compute
+           the subject's embedding, then through hyper_net to generate
+           personalised head parameters.
+        4. Deep-copies self.global_model (so save_global_model writes
+           the federated model, not the personalised copy), loads the
+           generated parameters into the copy's head, puts the copy in
+           eval mode.
+        5. Evaluates on the 80% evaluation split using evaluate_client.
+
+        Protocol note: the 80% evaluation split is the SAME partition
+        used by FedAvg/FedRep/FedBABU for this subject, so the four
+        methods are directly comparable on a per-subject basis.
+
+        Returns:
+        ClientMetrics
+            Metrics on the 80% evaluation split, using the hypernet-
+            generated personalised head.
+
+        Raises:
+        ValueError
+            If the evaluation set is empty.
+        """
+        test_subject = self.fold_config.test_subject
+
+        print(
+            f"\n  ══ Held-out calibration + evaluation "
+            f"(S{test_subject}, {self.config.algorithm}) ══"
+        )
+
+        # Step 1: build the same 20/80 per-condition-block split used
+        # by every other method.
+        calibration_ds, evaluation_ds = build_test_subject_splits(
+            test_subject=test_subject,
+            windowed_dir=self.config.windowed_dir,
+            device_type=self.config.device_type,
+            window_sec=self.config.window_sec,
+            label_map=self.config.label_map,
+            signals_to_load=self.config.signals_to_load,
+            calibration_fraction=self.config.calibration_fraction,
+            verbose=True,
+        )
+
+        if len(evaluation_ds) == 0:
+            raise ValueError(
+                f"Evaluation set for S{test_subject} is empty; "
+                f"cannot compute LOSO metric."
+            )
+        if len(calibration_ds) == 0:
+            raise ValueError(
+                f"Calibration set for S{test_subject} is empty; "
+                f"cannot compute embedding for hypernet."
+            )
+
+        print(
+            f"  PeFLL calibration: all {len(calibration_ds)} cal windows used "
+            f"as the embedding batch (single forward pass, no gradient "
+            f"descent on the head - hypernet IS the calibration mechanism)."
+        )
+
+        # Step 2: build a single batch containing ALL calibration windows.
+        # batch_size=len(calibration_ds) + drop_last=False guarantees
+        # one batch of all N cal samples.
+        pin = torch.cuda.is_available()
+        cal_loader = DataLoader(
+            calibration_ds,
+            batch_size=len(calibration_ds),
+            shuffle=False,
+            drop_last=False,
+            num_workers=self.config.num_workers,
+            pin_memory=pin,
+        )
+        # One iteration gives the full calibration batch
+        embed_signals, _embed_labels = next(iter(cal_loader))
+        embed_signals = {
+            k: v.to(self.device, non_blocking=True) for k, v in embed_signals.items()
+        }
+
+        # Step 3: generate the subject's personalised head parameters.
+        # EmbedNet + HyperNet in eval mode, no grad.
+        self.embed_net.eval()
+        self.hyper_net.eval()
+        with torch.no_grad():
+            client_embedding = self.embed_net(embed_signals)  # (embedding_dim,)
+            generated_params = self.hyper_net(client_embedding)  # OrderedDict
+
+        # Step 4: deep-copy the global model, load generated head params.
+        # Deep-copy preserves self.global_model for save_global_model
+        # and avoids mutating it during evaluation.
+        eval_model = copy.deepcopy(self.global_model).to(self.device)
+        self._load_head_params_into_model(eval_model, generated_params)
+        eval_model.eval()
+
+        # Step 5: evaluate on the 80% evaluation split.
+        evaluation_loader = DataLoader(
+            evaluation_ds,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=self.config.num_workers,
+            pin_memory=pin,
+        )
+
+        test_metrics = evaluate_client(
+            model=eval_model,
+            dataloader=evaluation_loader,
+            device=self.device,
+            subject_id=test_subject,
+            num_classes=self.config.n_classes,
+        )
+
+        print(f"  S{test_subject} hypernet-personalised metrics:")
+        print(f"    macro-F1:      {test_metrics.macro_f1:.4f}")
+        print(f"    accuracy:      {test_metrics.accuracy:.4f}")
+        print(f"    stress recall: {test_metrics.stress_recall:.4f}")
+        print(f"    stress F1:     {test_metrics.stress_f1:.4f}")
+        print(f"    n_samples:     {test_metrics.n_samples}")
+
+        return test_metrics
+
+    @staticmethod
+    def _load_head_params_into_model(model, head_params) -> None:
+        """Load hypernetwork-generated parameters into model.head.
+
+        Mirrors PeFLLClient.set_head_parameters() exactly: writes the
+        generated tensors into model.head.state_dict() and loads with
+        strict=False.  strict=False is required because model.head
+        contains BatchNorm running_mean / running_var / num_batches_tracked
+        buffers that the hypernetwork does NOT generate (those are
+        learned locally during federation on the base-only side and
+        copied from self.global_model by the deep-copy above).
+
+        Parameters:
+        model : WESADFLModel
+            Target model (deep-copied from self.global_model).
+        head_params : OrderedDict[str, torch.Tensor]
+            Parameter name -> tensor, as produced by WESADHyperNet.
+        """
+        head_state = model.head.state_dict()
+
+        learnable_names = {name for name, _ in model.head.named_parameters()}
+        for name in head_params:
+            if name not in learnable_names:
+                raise KeyError(
+                    f"Generated parameter '{name}' not found in head's "
+                    f"learnable parameters. Available: {sorted(learnable_names)}"
+                )
+
+        for name, param in head_params.items():
+            head_state[name] = param
+
+        model.head.load_state_dict(head_state, strict=False)
+
+    # Unseen client experiment (legacy; not on the main LOSO path)
 
     def evaluate_unseen_client(
         self,
@@ -339,6 +575,14 @@ class PeFLLServer(WESADServer):
         subject_id: int,
     ) -> dict:
         """Evaluate PeFLL on a completely unseen client.
+
+        DEPRECATED for the main LOSO path: the primary held-out
+        evaluation entry point is now evaluate_test_subject_with_calibration(),
+        which uses the standard 20/80 per-condition-block split shared
+        with FedAvg/FedRep/FedBABU.  This method is retained for the
+        optional "unseen client" experiment where PeFLL is evaluated on
+        subjects that were completely excluded from federation (not
+        just held out as a LOSO fold).
 
         generate personalised parameters for a client
         not seen during training, using only a small batch of their data.
