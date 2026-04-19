@@ -76,6 +76,22 @@ class FoldResultAccumulator:
     final_per_subject_acc: dict[int, float] = field(default_factory=dict)
     final_per_subject_stress_recall: dict[int, float] = field(default_factory=dict)
 
+    # Held-out test subject LOSO metrics (set at end of training by the
+    # server's evaluate_test_subject_with_calibration() step).  Under the
+    # held-out-with-calibration protocol the test subject is NOT an FL
+    # client, so these cannot be recovered from final_per_subject_* above
+    # (which only covers training clients).  These fields ARE the LOSO
+    # fold metric for FedAvg / FedRep / FedBABU / PeFLL.  -1.0 is the
+    # sentinel "not yet set" value — save() will skip persistence if
+    # test_subject_n_samples <= 0, and load_fold_result will use the same
+    # sentinel so a missing HDF5 dataset still round-trips cleanly.
+    test_subject_f1: float = -1.0
+    test_subject_acc: float = -1.0
+    test_subject_stress_recall: float = -1.0
+    test_subject_stress_f1: float = -1.0
+    test_subject_per_class_f1: list[float] = field(default_factory=list)
+    test_subject_n_samples: int = 0
+
     def __post_init__(self):
         if self.test_subject == 0:
             self.test_subject = self.fold_id
@@ -119,6 +135,41 @@ class FoldResultAccumulator:
         self.final_per_subject_f1 = per_subject_f1
         self.final_per_subject_acc = per_subject_acc
         self.final_per_subject_stress_recall = per_subject_stress_recall
+
+    def set_test_subject_metrics(self, metrics):
+        """Store the held-out test subject's post-calibration LOSO metrics.
+
+        Called once per run, at the end of training, by the server's
+        evaluate_test_subject_with_calibration() step.  Under the
+        held-out-with-calibration protocol (Collins et al. 2021 §5.3),
+        this is THE LOSO fold metric — not the mean over training
+        clients tracked in rs_test_f1.
+
+        Parameters
+        ----------
+        metrics : ClientMetrics
+            Metrics computed on the test subject's 80% evaluation split
+            after the algorithm-appropriate calibration step
+            (no-op for FedAvg; K-epoch head-only training for FedRep /
+            FedBABU / FedRepDP; hypernet-generated head for PeFLL).
+        """
+        # Guard against accidentally being passed the wrong subject's
+        # metrics.  Not fatal because the caller might legitimately
+        # re-key during testing, but worth a clear warning.
+        if metrics.subject_id != self.test_subject:
+            warnings.warn(
+                f"set_test_subject_metrics received metrics for "
+                f"S{metrics.subject_id} but this accumulator's "
+                f"test_subject is S{self.test_subject}.  Storing anyway.",
+                stacklevel=2,
+            )
+
+        self.test_subject_f1 = float(metrics.macro_f1)
+        self.test_subject_acc = float(metrics.accuracy)
+        self.test_subject_stress_recall = float(metrics.stress_recall)
+        self.test_subject_stress_f1 = float(metrics.stress_f1)
+        self.test_subject_per_class_f1 = list(metrics.per_class_f1)
+        self.test_subject_n_samples = int(metrics.n_samples)
 
     # Save / Load
 
@@ -213,6 +264,33 @@ class FoldResultAccumulator:
                 )
                 grp.create_dataset("final_per_subject_stress_recall", data=arr)
 
+            # Held-out test subject LOSO metrics.  Under the
+            # held-out-with-calibration protocol these ARE the fold
+            # result; the rs_* / final_per_subject_* above are only
+            # training-client monitoring.  Written only if actually set
+            # (test_subject_n_samples > 0); a sentinel of 0 indicates
+            # the server never called set_test_subject_metrics().
+            if self.test_subject_n_samples > 0:
+                grp.create_dataset(
+                    "test_subject_f1", data=np.float64(self.test_subject_f1)
+                )
+                grp.create_dataset(
+                    "test_subject_acc", data=np.float64(self.test_subject_acc)
+                )
+                grp.create_dataset(
+                    "test_subject_stress_recall",
+                    data=np.float64(self.test_subject_stress_recall),
+                )
+                grp.create_dataset(
+                    "test_subject_stress_f1",
+                    data=np.float64(self.test_subject_stress_f1),
+                )
+                grp.create_dataset(
+                    "test_subject_per_class_f1",
+                    data=np.array(self.test_subject_per_class_f1, dtype=np.float64),
+                )
+                grp.attrs["test_subject_n_samples"] = int(self.test_subject_n_samples)
+
             # Metadata as HDF5 attributes
             grp.attrs["algorithm"] = self.algorithm
             grp.attrs["fold_id"] = self.fold_id
@@ -251,6 +329,22 @@ class FoldResult:
     final_per_subject_acc: np.ndarray
     final_per_subject_stress_recall: np.ndarray
 
+    # Held-out test subject LOSO metrics (written under the
+    # held-out-with-calibration protocol).  Sentinel -1.0 means "not
+    # present in this HDF5 file", which will be the case for pre-
+    # protocol-change result files.  Consumers should check
+    # `has_test_subject_metrics` before using them, or use the
+    # backward-compatible `test_subject_final_f1` / `test_subject_loso_f1`
+    # properties which handle the fallback for you.
+    test_subject_f1: float = -1.0
+    test_subject_acc: float = -1.0
+    test_subject_stress_recall: float = -1.0
+    test_subject_stress_f1: float = -1.0
+    test_subject_per_class_f1: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.float64)
+    )
+    test_subject_n_samples: int = 0
+
     @property
     def best_f1(self) -> float:
         # Best macro-F1 achieved across all evaluation rounds
@@ -262,8 +356,51 @@ class FoldResult:
         return float(self.rs_test_f1[-1]) if len(self.rs_test_f1) > 0 else 0.0
 
     @property
+    def has_test_subject_metrics(self) -> bool:
+        """True if this file contains post-calibration LOSO metrics.
+
+        False for pre-protocol-change files (which relied on the
+        test-subject-as-client lookup in final_per_subject_f1).
+        """
+        return self.test_subject_n_samples > 0 and self.test_subject_f1 >= 0.0
+
+    @property
+    def test_subject_loso_f1(self) -> float:
+        """Post-calibration LOSO F1 for the held-out test subject.
+
+        This is THE LOSO fold metric under the held-out-with-calibration
+        protocol.  Raises if the file was written before the protocol
+        change (use `has_test_subject_metrics` to gate, or use
+        `test_subject_final_f1` for a backward-compatible view).
+        """
+        if not self.has_test_subject_metrics:
+            raise ValueError(
+                f"FoldResult for {self.algorithm} fold {self.fold_id} "
+                f"has no post-calibration LOSO metrics.  This file was "
+                f"probably produced before the held-out-with-calibration "
+                f"protocol was introduced.  Re-run this fold to get the "
+                f"correct LOSO number."
+            )
+        return float(self.test_subject_f1)
+
+    @property
     def test_subject_final_f1(self) -> float:
-        # Final F1 for the test subject specifically
+        """Final F1 for the test subject, preferring the new protocol.
+
+        New protocol (held-out-with-calibration): returns the post-
+        calibration LOSO F1 from the dedicated HDF5 field.  This is
+        the correct LOSO fold metric.
+
+        Legacy protocol (pre-fix): falls back to looking up the test
+        subject in the per-client final_per_subject_f1 array.  Under
+        the new protocol the test subject is not an FL client, so this
+        fallback returns 0.0; check `has_test_subject_metrics` first
+        if you need to distinguish "no LOSO metric written" from
+        "LOSO metric was legitimately 0".
+        """
+        if self.has_test_subject_metrics:
+            return float(self.test_subject_f1)
+        # Legacy fallback: look up test_subject among per-client results
         if len(self.final_per_subject_f1) > 0 and len(self.subject_ids) > 0:
             idx = np.where(self.subject_ids == self.test_subject)[0]
             if len(idx) > 0:
@@ -294,6 +431,12 @@ def load_fold_result(file_path: str) -> FoldResult:
                 return np.array(grp[name])
             return np.zeros(default_shape)
 
+        def _get_scalar(name, default=-1.0):
+            """Read a 0-d dataset as a Python float."""
+            if name in grp:
+                return float(np.asarray(grp[name]).item())
+            return default
+
         result = FoldResult(
             algorithm=str(grp.attrs.get("algorithm", "unknown")),
             fold_id=int(grp.attrs.get("fold_id", 0)),
@@ -308,6 +451,18 @@ def load_fold_result(file_path: str) -> FoldResult:
             final_per_subject_f1=_get("final_per_subject_f1"),
             final_per_subject_acc=_get("final_per_subject_acc"),
             final_per_subject_stress_recall=_get("final_per_subject_stress_recall"),
+            # Held-out test subject LOSO metrics (may be absent in
+            # pre-protocol-change files; sentinel -1.0 means "not set").
+            test_subject_f1=_get_scalar("test_subject_f1", default=-1.0),
+            test_subject_acc=_get_scalar("test_subject_acc", default=-1.0),
+            test_subject_stress_recall=_get_scalar(
+                "test_subject_stress_recall", default=-1.0
+            ),
+            test_subject_stress_f1=_get_scalar("test_subject_stress_f1", default=-1.0),
+            test_subject_per_class_f1=_get(
+                "test_subject_per_class_f1", default_shape=(0,)
+            ),
+            test_subject_n_samples=int(grp.attrs.get("test_subject_n_samples", 0)),
         )
 
     return result
@@ -363,12 +518,35 @@ def summarise_across_folds(results: list[FoldResult]) -> dict[str, Any]:
 
     Returns:
     dict with keys:
-        mean_f1, std_f1, mean_acc, std_acc,
-        mean_stress_recall, std_stress_recall,
-        per_fold_f1 (list), per_fold_test_f1 (list)
+        mean_test_f1, std_test_f1            - held-out LOSO macro-F1
+        mean_test_acc, std_test_acc          - held-out LOSO accuracy
+        mean_test_stress_recall, std_*       - held-out LOSO stress recall
+        per_fold_test_f1                     - list of per-fold LOSO F1
+        mean_f1, std_f1                      - training-client mean (monitor only)
+        mean_best_f1, std_best_f1            - best training-client mean per fold
+        mean_acc, std_acc                    - training-client mean accuracy
+        mean_stress_recall, std_stress_recall- training-client mean stress recall
+        n_folds                              - number of folds summarised
     """
-    # Using the test subject's final F1 as the fold result (standard LOSO)
+    # The test subject's post-calibration LOSO metric IS the fold
+    # result under the held-out-with-calibration protocol.
+    # test_subject_final_f1 prefers the new dedicated field and falls
+    # back to the old per-client lookup so pre-protocol result files
+    # still produce a value.
     fold_test_f1s = [r.test_subject_final_f1 for r in results]
+
+    # LOSO accuracy and stress recall come from the dedicated
+    # test_subject_* fields.  If a given result was written before the
+    # protocol change, these will be sentinel -1.0; filter those out
+    # before averaging so they don't drag the mean below zero.
+    fold_test_accs = [r.test_subject_acc for r in results if r.has_test_subject_metrics]
+    fold_test_stress_recalls = [
+        r.test_subject_stress_recall for r in results if r.has_test_subject_metrics
+    ]
+
+    # Training-client monitoring statistics (mean across the 13 FL
+    # clients, per round).  These are NOT the LOSO result but are
+    # useful for convergence diagnostics and plots.
     fold_mean_f1s = [r.final_f1 for r in results]
     fold_best_f1s = [r.best_f1 for r in results]
 
@@ -381,26 +559,41 @@ def summarise_across_folds(results: list[FoldResult]) -> dict[str, Any]:
         for r in results
     ]
 
-    return {
-        # Test subject's F1 per fold
-        "mean_test_f1": float(np.mean(fold_test_f1s)),
-        "std_test_f1": float(np.std(fold_test_f1s)),
+    summary: dict[str, Any] = {
+        # Test subject's LOSO metric per fold (primary result)
+        "mean_test_f1": float(np.mean(fold_test_f1s)) if fold_test_f1s else 0.0,
+        "std_test_f1": float(np.std(fold_test_f1s)) if fold_test_f1s else 0.0,
         "per_fold_test_f1": fold_test_f1s,
-        # Mean F1 across all clients per fold
-        "mean_f1": float(np.mean(fold_mean_f1s)),
-        "std_f1": float(np.std(fold_mean_f1s)),
+        # Mean F1 across training clients per fold (monitoring only)
+        "mean_f1": float(np.mean(fold_mean_f1s)) if fold_mean_f1s else 0.0,
+        "std_f1": float(np.std(fold_mean_f1s)) if fold_mean_f1s else 0.0,
         # Best F1 achieved (for convergence comparison)
-        "mean_best_f1": float(np.mean(fold_best_f1s)),
-        "std_best_f1": float(np.std(fold_best_f1s)),
-        # Accuracy (Liu et al. 2021 comparison)
-        "mean_acc": float(np.mean(fold_accs)),
-        "std_acc": float(np.std(fold_accs)),
-        # Stress recall (most clinical relevance)
-        "mean_stress_recall": float(np.mean(fold_stress_recalls)),
-        "std_stress_recall": float(np.std(fold_stress_recalls)),
+        "mean_best_f1": float(np.mean(fold_best_f1s)) if fold_best_f1s else 0.0,
+        "std_best_f1": float(np.std(fold_best_f1s)) if fold_best_f1s else 0.0,
+        # Training-client mean accuracy / stress recall (monitoring only)
+        "mean_acc": float(np.mean(fold_accs)) if fold_accs else 0.0,
+        "std_acc": float(np.std(fold_accs)) if fold_accs else 0.0,
+        "mean_stress_recall": (
+            float(np.mean(fold_stress_recalls)) if fold_stress_recalls else 0.0
+        ),
+        "std_stress_recall": (
+            float(np.std(fold_stress_recalls)) if fold_stress_recalls else 0.0
+        ),
         # Number of folds
         "n_folds": len(results),
     }
+
+    # LOSO accuracy and stress recall — only populated if at least one
+    # result file contains test_subject_* fields.
+    if fold_test_accs:
+        summary["mean_test_acc"] = float(np.mean(fold_test_accs))
+        summary["std_test_acc"] = float(np.std(fold_test_accs))
+        summary["n_folds_with_loso"] = len(fold_test_accs)
+    if fold_test_stress_recalls:
+        summary["mean_test_stress_recall"] = float(np.mean(fold_test_stress_recalls))
+        summary["std_test_stress_recall"] = float(np.std(fold_test_stress_recalls))
+
+    return summary
 
 
 def print_cross_fold_summary(algorithm: str, summary: dict[str, Any]):
