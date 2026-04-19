@@ -28,14 +28,15 @@ import time
 
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
 
 from ...models.wesad_fl_model import WESADFLModel, build_fl_model_from_config
 from ...utils.fl_config import FLConfig
 from ...utils.metrics import (
-    # ClientMetrics,
+    ClientMetrics,
     FoldMetrics,
     compute_fold_metrics,
-    # evaluate_client,
+    evaluate_client,
     print_fold_metrics,
 )
 from ...utils.result_store import FoldResultAccumulator
@@ -43,6 +44,7 @@ from ...utils.wesad_fl_dataset import (
     FLClientDataManager,
     FLFoldConfig,
     build_fl_fold_datasets,
+    build_test_subject_splits,
 )
 from ..clients.client_base import WESADClient
 
@@ -432,6 +434,260 @@ class WESADServer:
     #     else:
     #         print(f"  DLG: no valid reconstructions (round {round_num})")
 
+    # ------------------------------------------------------------------
+    # Held-out test subject evaluation with calibration
+    # ------------------------------------------------------------------
+    #
+    # These three methods implement the post-federation evaluation of
+    # the held-out test subject under the held-out-with-calibration
+    # protocol (Collins et al. 2021 §5.3 "Generalization to new clients";
+    # Chen et al. 2020 FedHealth; Cross_Modal_KD plan).
+    #
+    # Protocol:
+    #   1. Build per-condition-block 20/80 temporal stratified split of
+    #      the test subject's non-overlapped windows.
+    #   2. Deep-copy the final global model (keeps self.global_model
+    #      unmodified so save_global_model() saves the federated model).
+    #   3. Dispatch by algorithm:
+    #        FedAvg  -> no calibration; evaluate global on eval set.
+    #        FedRep  -> fresh random head; K-epoch head-only training
+    #                   on calibration set with base frozen; AdamW +
+    #                   CE loss with class weights from calibration set.
+    #        FedBABU -> same as FedRep (by design).
+    #        PeFLL   -> hypernet generates head from embedding
+    #                   (PeFLLServer overrides this method).
+    #   4. Evaluate on the 80% evaluation set.  Return ClientMetrics.
+
+    def evaluate_test_subject_with_calibration(self) -> ClientMetrics:
+        """Post-federation LOSO evaluation of the held-out test subject.
+
+        Returns
+        -------
+        ClientMetrics
+            Metrics on the 80% evaluation split, after the algorithm-
+            appropriate calibration step (if any).
+
+        Raises
+        ------
+        ValueError
+            If config.algorithm is unknown to this dispatcher.
+        NotImplementedError
+            If config.algorithm requires a subclass override (PeFLL).
+        """
+        test_subject = self.fold_config.test_subject
+        algorithm = self.config.algorithm
+
+        print(
+            f"\n  ══ Held-out calibration + evaluation "
+            f"(S{test_subject}, {algorithm}) ══"
+        )
+
+        # Step 1: build calibration / evaluation splits.
+        calibration_ds, evaluation_ds = build_test_subject_splits(
+            test_subject=test_subject,
+            windowed_dir=self.config.windowed_dir,
+            device_type=self.config.device_type,
+            window_sec=self.config.window_sec,
+            label_map=self.config.label_map,
+            signals_to_load=self.config.signals_to_load,
+            calibration_fraction=self.config.calibration_fraction,
+            verbose=True,
+        )
+
+        if len(evaluation_ds) == 0:
+            raise ValueError(
+                f"Evaluation set for S{test_subject} is empty; "
+                f"cannot compute LOSO metric."
+            )
+
+        # DataLoaders.  Eval is deterministic; calibration shuffles.
+        # Neither uses augmentation (datasets were built with mode="test").
+        pin = torch.cuda.is_available()
+        cal_batch = min(self.config.batch_size, max(len(calibration_ds), 1))
+        calibration_loader = DataLoader(
+            calibration_ds,
+            batch_size=cal_batch,
+            shuffle=True,
+            drop_last=False,
+            num_workers=self.config.num_workers,
+            pin_memory=pin,
+        )
+        evaluation_loader = DataLoader(
+            evaluation_ds,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=self.config.num_workers,
+            pin_memory=pin,
+        )
+
+        # Step 2: deep-copy the global model so calibration does not
+        # mutate self.global_model (which save_global_model() saves).
+        eval_model = copy.deepcopy(self.global_model).to(self.device)
+
+        # Step 3: algorithm dispatch.
+        if algorithm in ("FedAvg", "FedProx"):
+            print(
+                "  No calibration (FedAvg/FedProx): evaluating global "
+                "model directly on the 80% evaluation set."
+            )
+
+        elif algorithm in ("FedRep", "FedBABU", "FedRepDP"):
+            print(
+                f"  Calibration: {self.config.calibration_epochs} epochs "
+                f"on {len(calibration_ds)} windows (head only, base "
+                f"frozen, lr={self.config.calibration_lr})"
+            )
+            self._reset_head_weights(eval_model)
+            self._calibrate_head(
+                model=eval_model,
+                calibration_loader=calibration_loader,
+                calibration_dataset=calibration_ds,
+                epochs=self.config.calibration_epochs,
+            )
+
+        elif algorithm == "PeFLL":
+            raise NotImplementedError(
+                "PeFLLServer must override "
+                "evaluate_test_subject_with_calibration() to use the "
+                "hypernetwork-based head generation."
+            )
+
+        else:
+            raise ValueError(
+                f"Unknown algorithm {algorithm!r} for held-out "
+                f"calibration.  Expected: FedAvg, FedProx, FedRep, "
+                f"FedBABU, FedRepDP, PeFLL."
+            )
+
+        # Step 4: evaluate on the 80% evaluation set.
+        test_metrics = evaluate_client(
+            model=eval_model,
+            dataloader=evaluation_loader,
+            device=self.device,
+            subject_id=test_subject,
+            num_classes=self.config.n_classes,
+        )
+
+        print(f"  S{test_subject} post-calibration metrics:")
+        print(f"    macro-F1:      {test_metrics.macro_f1:.4f}")
+        print(f"    accuracy:      {test_metrics.accuracy:.4f}")
+        print(f"    stress recall: {test_metrics.stress_recall:.4f}")
+        print(f"    stress F1:     {test_metrics.stress_f1:.4f}")
+        print(f"    n_samples:     {test_metrics.n_samples}")
+
+        return test_metrics
+
+    def _reset_head_weights(self, model: WESADFLModel) -> None:
+        """Re-initialise the head with fresh random weights.
+
+        For the held-out-with-calibration protocol, FedRep/FedBABU
+        evaluate on a *new* client that had no role in federation, so
+        the head cannot inherit any training client's parameters.
+        Collins et al. 2021 handles this by solving for the optimal
+        head given the representation and the new client's calibration
+        samples; our proxy is K epochs of gradient descent on a random
+        initialisation, which is sufficient for a small LSTM head.
+
+        Walks all submodules of model.head and calls reset_parameters()
+        (covers Linear, Conv, LSTM, GRU, BatchNorm, LayerNorm).
+        """
+        reset_count = 0
+        for module in model.head.modules():
+            if hasattr(module, "reset_parameters") and callable(
+                module.reset_parameters
+            ):
+                module.reset_parameters()
+                reset_count += 1
+        print(
+            f"    [head reset] re-initialised {reset_count} submodules "
+            f"in model.head"
+        )
+
+    def _calibrate_head(
+        self,
+        model: WESADFLModel,
+        calibration_loader: DataLoader,
+        calibration_dataset,
+        epochs: int,
+    ) -> None:
+        """Train model.head on the calibration loader with base frozen.
+
+        Uses AdamW with class weights computed from the CALIBRATION
+        dataset (not the federation pool), because the held-out test
+        subject has their own class balance and using federation-level
+        weights would bias the decision threshold.
+
+        BatchNorm handling: model.base contains BatchNorm1d layers.
+        Running the base in train() mode during calibration would
+        update its BN running statistics from the test subject's data,
+        which is a subtle leakage source.  We therefore put the base
+        in eval() mode while leaving the head in train() mode — base
+        BN statistics stay fixed at their federation-final values.
+        """
+        # Freeze base parameters; unfreeze head parameters.
+        for p in model.base.parameters():
+            p.requires_grad = False
+        for p in model.head.parameters():
+            p.requires_grad = True
+
+        class_weights = calibration_dataset.get_class_weights().to(self.device)
+        loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+
+        # Use calibration_lr (smaller than federation LR) because the
+        # calibration set is tiny (~28 windows) and a larger step
+        # would overshoot.  Matches Cross_Modal_KD plan's 1e-4.
+        optimizer = torch.optim.AdamW(
+            model.head.parameters(),
+            lr=self.config.calibration_lr,
+            weight_decay=self.config.weight_decay,
+        )
+
+        # Base in eval() mode freezes its BN running statistics so
+        # they cannot be updated by test subject's data.  Head in
+        # train() mode enables dropout/BN training-mode behaviour
+        # for the head layers.
+        model.base.eval()
+        model.head.train()
+
+        for epoch in range(epochs):
+            total_loss = 0.0
+            n_batches = 0
+            n_samples_seen = 0
+            for signals, labels in calibration_loader:
+                signals = {
+                    k: v.to(self.device, non_blocking=True) for k, v in signals.items()
+                }
+                labels = labels.to(self.device, non_blocking=True)
+
+                logits = model(signals)
+                loss = loss_fn(logits, labels)
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+                n_batches += 1
+                n_samples_seen += labels.size(0)
+
+            if n_batches > 0:
+                mean_loss = total_loss / n_batches
+                print(
+                    f"    [calibration epoch {epoch + 1}/{epochs}] "
+                    f"mean_loss={mean_loss:.4f}  batches={n_batches}  "
+                    f"samples={n_samples_seen}"
+                )
+
+        # Restore requires_grad and put model fully in eval mode for
+        # the subsequent evaluation pass.
+        for p in model.base.parameters():
+            p.requires_grad = True
+        for p in model.head.parameters():
+            p.requires_grad = True
+
+        model.eval()
+
     # Result saving
 
     def save_results(self, result_dir: str = "results/"):
@@ -544,19 +800,30 @@ class WESADServer:
 
             budget.append(time.time() - round_start)
 
-        # Final evaluation: captures the personalised state after the
-        # last round's local training and aggregation.  Clients still
-        # hold their post-training local parameters so for PFL methods this evaluates the
-        # personalised model, not the global model.
+        # Final training-client monitoring evaluation.  Under the
+        # held-out-with-calibration protocol, the test subject is NOT
+        # in self.clients, so final_metrics.test_subject_metrics is
+        # None by construction.  The true LOSO fold metric comes from
+        # evaluate_test_subject_with_calibration() below.
         print(
-            f"\n  -> Final evaluation (after round {self.config.global_rounds - 1}) <-"
+            f"\n  -> Final monitoring evaluation "
+            f"(after round {self.config.global_rounds - 1}) <-"
         )
         final_metrics = self.evaluate(round_num=self.config.global_rounds)
 
+        # Held-out test subject evaluation with calibration — the LOSO
+        # fold metric.  Uses self.global_model (deep-copied inside the
+        # utility so the saved checkpoint is unaffected).
+        test_subject_metrics = self.evaluate_test_subject_with_calibration()
+        self.results.set_test_subject_metrics(test_subject_metrics)
+
         # Summary
-        if final_metrics.test_subject_metrics is not None:
-            test_f1 = final_metrics.test_subject_metrics.macro_f1
-            print(f"\n  Final test subject F1: {test_f1:.4f}")
+        print(f"\n  Final test subject F1: {test_subject_metrics.macro_f1:.4f}")
+        print(
+            f"  Mean training-client F1: "
+            f"{final_metrics.mean_macro_f1:.4f} ± "
+            f"{final_metrics.std_macro_f1:.4f}"
+        )
         if budget:
             avg_time = sum(budget) / len(budget)
             print(f"  Average round time: {avg_time:.2f}s")
