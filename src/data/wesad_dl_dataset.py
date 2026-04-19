@@ -123,6 +123,7 @@ class WESADDLDataset(Dataset):
         signals_to_load: list[str] | None = None,
         epsilon: float = 1e-8,
         exclude_nonoverlapped: bool = False,
+        window_indices: dict[int, np.ndarray] | None = None,
     ):
         assert mode in ("train", "val", "test"), f"Invalid mode: {mode}"
         assert device_type in ("chest", "wrist"), f"Invalid device: {device_type}"
@@ -135,20 +136,35 @@ class WESADDLDataset(Dataset):
         self.signals_to_load = signals_to_load
         self.epsilon = epsilon
         # When mode="train", if exclude_nonoverlapped=True we keep ONLY
-        # overlapped windows and drop the non-overlapped ones.  This is
-        # used in FL for the test subject's own training dataset, so that
-        # their local training windows are disjoint from their test set
-        # (which consists of non-overlapped windows).  Without this flag,
-        # personalised FL methods (FedRep, FedBABU, PeFLL) can trivially
-        # memorise the test windows via the local head (observed: F1=1.00
-        # on S2 after 5 rounds of FedRep).  No-op unless mode="train".
+        # overlapped windows and drop the non-overlapped ones.  Kept for
+        # backward compatibility with earlier code; no longer used by the
+        # new held-out-with-calibration FL protocol (the test subject is
+        # simply not a federation participant, so this flag is unnecessary).
         self.exclude_nonoverlapped = exclude_nonoverlapped
+        # Optional per-subject selector that restricts the loaded windows
+        # to a specific set of indices (in the subject's original window
+        # ordering, BEFORE mode-based overlap filtering).  Used by the
+        # calibration/evaluation split helper to build two datasets that
+        # share the same underlying windowing but select non-overlapping
+        # subsets of windows.  Keys are subject IDs; values are 1-D
+        # integer arrays of window_idx values to keep.  None means "keep
+        # all windows allowed by mode".
+        self.window_indices = window_indices
 
         # Load and concatenate windows from all requested subjects
         self.signal_names: list[str] = []  # populated on first subject load
         self._signal_arrays: dict[str, np.ndarray] = {}  # name → (N, T[, C])
         self._labels: np.ndarray = np.array([], dtype=np.int64)
         self._subject_ids_per_window: np.ndarray = np.array([], dtype=np.int64)
+        # New: per-window timing + original-window-index metadata.
+        # _start_sec / _end_sec are the recording-time boundaries in
+        # seconds (from wesad_dl_windowing.py).  _original_idx is the
+        # window_idx from the source metadata.csv, which is useful for
+        # the calibration/evaluation split helper to express its
+        # selection in terms of the original ordering.
+        self._start_sec: np.ndarray = np.array([], dtype=np.float64)
+        self._end_sec: np.ndarray = np.array([], dtype=np.float64)
+        self._original_idx: np.ndarray = np.array([], dtype=np.int64)
 
         for sid in subject_ids:
             self._load_subject(sid, windowed_dir, window_sec, device_type)
@@ -181,21 +197,31 @@ class WESADDLDataset(Dataset):
         # Load metadata
         labels = []
         is_overlapped = []
+        start_secs = []
+        end_secs = []
+        window_idxs = []
 
         with open(meta_path, "r") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 labels.append(float(row["label"]))
                 is_overlapped.append(row["is_overlapped"] == "True")
+                # start_sec / end_sec added to support temporal splits
+                # (calibration/evaluation).  window_idx gives us a stable
+                # handle on the original ordering.
+                start_secs.append(float(row["start_sec"]))
+                end_secs.append(float(row["end_sec"]))
+                window_idxs.append(int(row["window_idx"]))
 
         labels = np.array(labels)
         is_overlapped = np.array(is_overlapped)
+        start_secs = np.array(start_secs, dtype=np.float64)
+        end_secs = np.array(end_secs, dtype=np.float64)
+        window_idxs = np.array(window_idxs, dtype=np.int64)
 
         # Filter by mode
         # Train: keep ALL windows (overlapped + independent), UNLESS
-        #   exclude_nonoverlapped=True (used for the test-subject-as-FL-client
-        #   whose non-overlapped windows are the test set and must not
-        #   appear in their local training data).
+        #   exclude_nonoverlapped=True (legacy flag, kept for back-compat).
         # Val/Test: keep ONLY non-overlapped (independent) windows
         if self.mode in ("val", "test"):
             keep_mask = ~is_overlapped
@@ -203,6 +229,15 @@ class WESADDLDataset(Dataset):
             keep_mask = is_overlapped.astype(bool)
         else:
             keep_mask = np.ones(len(labels), dtype=bool)
+
+        # Apply optional per-subject window_indices selector AFTER the
+        # mode filter.  The selector is expressed in terms of the source
+        # window_idx values (as stored in metadata.csv), so we intersect
+        # with the current keep_mask.
+        if self.window_indices is not None and subject_id in self.window_indices:
+            allowed = set(self.window_indices[subject_id].tolist())
+            idx_mask = np.array([wi in allowed for wi in window_idxs], dtype=bool)
+            keep_mask = keep_mask & idx_mask
 
         # Map labels to integer classes
         mapped_labels = np.array(
@@ -254,6 +289,12 @@ class WESADDLDataset(Dataset):
         sid_array = np.full(len(mapped_labels), subject_id, dtype=np.int64)
         self._subject_ids_per_window = np.concatenate(
             [self._subject_ids_per_window, sid_array]
+        )
+        # Append temporal metadata (aligned with the kept windows)
+        self._start_sec = np.concatenate([self._start_sec, start_secs[keep_mask]])
+        self._end_sec = np.concatenate([self._end_sec, end_secs[keep_mask]])
+        self._original_idx = np.concatenate(
+            [self._original_idx, window_idxs[keep_mask]]
         )
 
     #  Normalization
@@ -399,6 +440,26 @@ class WESADDLDataset(Dataset):
     def get_signal_shapes(self) -> dict[str, tuple]:
         """Return {signal_name: (n_windows, T[, C])} for inspection."""
         return {name: arr.shape for name, arr in self._signal_arrays.items()}
+
+    # Temporal-metadata accessors
+    #
+    # These expose per-window start/end times (in recording seconds) and
+    # the original window_idx from the source metadata.csv.  They are
+    # used by build_test_subject_splits() to construct the per-condition-
+    # block 20/80 calibration/evaluation split without having to re-read
+    # metadata.csv from disk.
+
+    def get_start_sec(self) -> np.ndarray:
+        """Return the start time (in seconds) of each loaded window."""
+        return self._start_sec
+
+    def get_end_sec(self) -> np.ndarray:
+        """Return the end time (in seconds) of each loaded window."""
+        return self._end_sec
+
+    def get_original_indices(self) -> np.ndarray:
+        """Return the original window_idx (from metadata.csv) of each loaded window."""
+        return self._original_idx
 
 
 # build train/val/test datasets for one LOSO fold
