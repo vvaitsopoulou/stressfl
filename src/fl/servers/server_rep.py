@@ -159,33 +159,51 @@ class FedRepServer(WESADServer):
 
             budget.append(time.time() - round_start)
 
-        # Final evaluation
-        # After the last round's aggregation, clients hold:
-        #   base: their locally-trained base from Phase 2 of the
-        #         last round (NOT yet overwritten by the new global)
+        # Final training-client monitoring evaluation.  After the last
+        # round's aggregation, each of the 13 TRAINING clients holds:
+        #   base: their locally-trained base from Phase 2 of the last
+        #         round (NOT yet overwritten by the new global)
         #   head: their locally-trained head from Phase 1
-        # This is the final personalised model for each client.
+        # Under the held-out-with-calibration protocol, the TEST
+        # subject is NOT an FL client, so this evaluation tracks only
+        # the 13 training subjects as a convergence-monitoring metric.
         print(
-            f"\n  ─── Final evaluation (after round {self.config.global_rounds - 1}) ───"
+            f"\n  ─── Final monitoring evaluation "
+            f"(after round {self.config.global_rounds - 1}) ───"
         )
-        print("  Evaluating final personalised models")
+        print("  Evaluating training-clients' personalised models")
         final_metrics = self.evaluate(round_num=self.config.global_rounds)
 
+        # Held-out test subject evaluation WITH calibration.
+        # Utility:
+        #   1. Builds the 20/80 per-block calibration/evaluation split.
+        #   2. Deep-copies self.global_model (leaves it untouched for
+        #      save_global_model()).
+        #   3. Re-initialises the head with random weights.
+        #   4. Trains the head for calibration_epochs epochs on the
+        #      calibration set with base frozen and base BN statistics
+        #      frozen.
+        #   5. Evaluates on the 80% evaluation split.
+        # THIS IS THE LOSO FOLD METRIC for FedRep.
+        test_subject_metrics = self.evaluate_test_subject_with_calibration()
+        self.results.set_test_subject_metrics(test_subject_metrics)
+
         # Summary
-        if final_metrics.test_subject_metrics is not None:
-            test_f1 = final_metrics.test_subject_metrics.macro_f1
-            test_acc = final_metrics.test_subject_metrics.accuracy
-            test_sr = final_metrics.test_subject_metrics.stress_recall
-            print(
-                f"\n  ═══ FedRep Final Results (fold S{self.fold_config.test_subject}) ═══"
-            )
-            print(f"  Test subject F1:            {test_f1:.4f}")
-            print(f"  Test subject Accuracy:      {test_acc:.4f}")
-            print(f"  Test subject Stress Recall: {test_sr:.4f}")
-            print(
-                f"  Mean client F1:             {final_metrics.mean_macro_f1:.4f} "
-                f"± {final_metrics.std_macro_f1:.4f}"
-            )
+        print(
+            f"\n  ═══ FedRep Final Results "
+            f"(fold S{self.fold_config.test_subject}) ═══"
+        )
+        print("  Held-out test subject (LOSO fold metric):")
+        print(f"    macro-F1:       {test_subject_metrics.macro_f1:.4f}")
+        print(f"    accuracy:       {test_subject_metrics.accuracy:.4f}")
+        print(f"    stress recall:  {test_subject_metrics.stress_recall:.4f}")
+        print(f"    stress F1:      {test_subject_metrics.stress_f1:.4f}")
+        print(f"    n_eval samples: {test_subject_metrics.n_samples}")
+        print("  Training-client monitoring (13 clients):")
+        print(
+            f"    mean macro-F1:  {final_metrics.mean_macro_f1:.4f} "
+            f"± {final_metrics.std_macro_f1:.4f}"
+        )
 
         if budget:
             avg_time = sum(budget) / len(budget)
