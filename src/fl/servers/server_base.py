@@ -533,12 +533,49 @@ class WESADServer:
             )
 
         elif algorithm in ("FedRep", "FedBABU", "FedRepDP"):
+            init_mode = getattr(self.config, "calibration_init", "cold_start")
             print(
                 f"  Calibration: {self.config.calibration_epochs} epochs "
                 f"on {len(calibration_ds)} windows (head only, base "
-                f"frozen, lr={self.config.calibration_lr})"
+                f"frozen, lr={self.config.calibration_lr}, "
+                f"init={init_mode})"
             )
-            self._reset_head_weights(eval_model)
+
+            if init_mode == "warm_start":
+                # Load the federated mean head into the eval model's
+                # head slot.  Falls back to cold_start if the mean head
+                # is unavailable (e.g., federation set_clients wasn't
+                # called for some reason) or the copy fails.
+                try:
+                    mean_head_state = self._federated_mean_head()
+                    # Move tensors to the device of eval_model.head
+                    target_device = next(eval_model.head.parameters()).device
+                    mean_head_state = {
+                        k: v.to(target_device) for k, v in mean_head_state.items()
+                    }
+                    # strict=True: shapes must match exactly.  They will,
+                    # because mean_head_state was derived from client
+                    # heads which share the same architecture as
+                    # eval_model.head.
+                    eval_model.head.load_state_dict(mean_head_state, strict=True)
+                    print(
+                        "    [warm start] loaded federated mean head " "into eval model"
+                    )
+                except Exception as e:
+                    print(
+                        f"    [warn] warm_start failed "
+                        f"({type(e).__name__}: {e}); falling back to "
+                        f"cold_start"
+                    )
+                    self._reset_head_weights(eval_model)
+            elif init_mode == "cold_start":
+                self._reset_head_weights(eval_model)
+            else:
+                raise ValueError(
+                    f"Unknown calibration_init={init_mode!r}.  "
+                    f"Expected 'cold_start' or 'warm_start'."
+                )
+
             self._calibrate_head(
                 model=eval_model,
                 calibration_loader=calibration_loader,
@@ -603,6 +640,94 @@ class WESADServer:
             f"    [head reset] re-initialised {reset_count} submodules "
             f"in model.head"
         )
+
+    def _federated_mean_head(self) -> dict[str, torch.Tensor]:
+        """Compute the weighted mean of all training-client heads.
+
+        Weights are proportional to client.train_samples (same scheme
+        as aggregate_parameters for the base).  BN running statistics
+        are RESET (not averaged) to neutral values, because:
+
+          (1) BN running mean/var are not learnable parameters; they
+              accumulate via exponential moving average during training.
+              Averaging them across heterogeneous clients yields a
+              distribution that doesn't correspond to any real subject's
+              feature statistics.
+
+          (2) The calibration step runs the head in .train() mode on
+              the test subject's 28 calibration windows, which updates
+              BN running stats from that subject's actual feature
+              distribution.  Starting from neutral (mean=0, var=1)
+              lets the calibration loop do this cleanly.
+
+        Returns
+        -------
+        dict[str, torch.Tensor]
+            State dict matching model.head.state_dict().  Learnable
+            parameters are the sample-weighted mean of client heads;
+            BN buffers are reset.
+
+        Raises
+        ------
+        RuntimeError
+            If set_clients() has not been called yet (self.clients empty).
+        """
+        if not self.clients:
+            raise RuntimeError(
+                "_federated_mean_head requires self.clients to be "
+                "populated.  Call set_clients() before this method."
+            )
+
+        total_samples = sum(c.train_samples for c in self.clients)
+        weights = [c.train_samples / total_samples for c in self.clients]
+
+        # Start from a zeroed-out template shaped like the first client's head.
+        # detach() ensures we don't carry autograd history.
+        template = self.clients[0].model.head.state_dict()
+        mean_state: dict[str, torch.Tensor] = {
+            k: torch.zeros_like(v, dtype=torch.float32) for k, v in template.items()
+        }
+
+        # BN buffer names we want to reset rather than average.  This
+        # matches the naming pattern produced by nn.BatchNorm1d
+        # (lstm_bn.running_mean, lstm_bn.running_var,
+        #  lstm_bn.num_batches_tracked).
+        bn_buffer_suffixes = (
+            ".running_mean",
+            ".running_var",
+            ".num_batches_tracked",
+        )
+
+        # Weighted sum of learnable params; BN buffers skipped (will be
+        # reset below).
+        for client, w in zip(self.clients, weights):
+            client_state = client.model.head.state_dict()
+            for k, v in client_state.items():
+                if any(k.endswith(suf) for suf in bn_buffer_suffixes):
+                    continue  # handled below
+                mean_state[k] = mean_state[k] + w * v.detach().float()
+
+        # Reset BN buffers to neutral values so calibration re-estimates
+        # them on the test subject's data.
+        for k, v in template.items():
+            if k.endswith(".running_mean"):
+                mean_state[k] = torch.zeros_like(v, dtype=torch.float32)
+            elif k.endswith(".running_var"):
+                mean_state[k] = torch.ones_like(v, dtype=torch.float32)
+            elif k.endswith(".num_batches_tracked"):
+                # This buffer is int64 in PyTorch
+                mean_state[k] = torch.zeros_like(v)
+
+        # Cast each tensor back to the template's dtype to avoid
+        # load_state_dict dtype mismatches.
+        for k in mean_state:
+            mean_state[k] = mean_state[k].to(dtype=template[k].dtype)
+
+        print(
+            f"    [mean head] averaged {len(self.clients)} client heads "
+            f"(weighted by sample count; BN buffers reset)"
+        )
+        return mean_state
 
     def _calibrate_head(
         self,
@@ -717,14 +842,54 @@ class WESADServer:
         return self.results.save(result_dir=result_dir)
 
     def save_global_model(self, path: str | None = None):
-        """Save the global model checkpoint."""
+        """Save the global model checkpoint.
+
+        Writes a dict with keys:
+          - "global_model_state_dict":
+                self.global_model.state_dict() (the federated base +
+                the untouched global head slot).
+          - "federated_mean_head_state_dict":
+                Only for algorithms with local heads (FedRep / FedBABU /
+                FedRepDP).  Weighted mean of the training clients' heads
+                at end of federation, computed via
+                self._federated_mean_head().  BN buffers are reset.
+                Used by evaluate_test_subject_with_calibration() when
+                config.calibration_init == "warm_start".
+          - "algorithm": self.config.algorithm (for sanity checks on load).
+
+        For backward compatibility with pre-warm-start checkpoints, the
+        calibration dispatch inspects the loaded dict and falls back to
+        cold_start with a warning if the mean head is absent.
+        """
         if path is None:
             path = os.path.join(
                 "models",
                 f"{self.config.algorithm}_fold{self.fold_config.test_subject}_global.pt",
             )
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(self.global_model.state_dict(), path)
+
+        checkpoint = {
+            "global_model_state_dict": self.global_model.state_dict(),
+            "algorithm": self.config.algorithm,
+        }
+
+        # Only algorithms with local heads have meaningful client-side
+        # heads to average.  For FedAvg / FedProx (where the head is
+        # part of the aggregated full model) the mean equals the global
+        # model's head, so there's no benefit to storing it separately.
+        if self.config.algorithm in ("FedRep", "FedBABU", "FedRepDP"):
+            try:
+                checkpoint["federated_mean_head_state_dict"] = (
+                    self._federated_mean_head()
+                )
+            except Exception as e:
+                print(
+                    f"    [warn] could not compute federated mean head: "
+                    f"{type(e).__name__}: {e}.  Saving base only; "
+                    f"warm_start calibration will fall back to cold_start."
+                )
+
+        torch.save(checkpoint, path)
         print(f"  Global model saved: {path}")
 
     # Main training loop
