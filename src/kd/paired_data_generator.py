@@ -56,13 +56,13 @@ import warnings
 import neurokit2 as nk
 import numpy as np
 
-from kd.hrv_feature_extractor import (
+from src.kd.hrv_feature_extractor import (
     clean_ibi_series,
     extract_primary_features,
     features_to_array,
     is_valid_window,
 )
-from kd.kd_config import (
+from src.kd.kd_config import (
     ACC_SAMPLES_PER_WINDOW,
     ACTIVE_LABELS,
     ALL_SUBJECT_IDS,

@@ -30,7 +30,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from kd.kd_config import (
+from src.kd.kd_config import (
     TEACHER_LSTM_HIDDEN,
     TEACHER_TARGET_TIME,
 )
