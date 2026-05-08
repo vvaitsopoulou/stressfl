@@ -36,7 +36,7 @@ try:
 except ImportError:
     HAS_MPL = False
 
-from kd.kd_config import (
+from src.kd.kd_config import (
     KD_FIGURES_DIR,
     ensure_dirs,
 )
@@ -359,7 +359,7 @@ def plot_confusion_matrices(
         axes = [axes]
 
     for ax, (cond, cm) in zip(axes, matrices.items()):
-        # im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
+        ax.imshow(cm, interpolation="nearest", cmap="Blues")
         ax.set_title(CONDITION_LABELS.get(cond, cond), fontsize=10)
         ax.set_xticks(range(len(class_names)))
         ax.set_yticks(range(len(class_names)))
