@@ -34,7 +34,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, TensorDataset
 
-from kd.kd_config import (
+from src.kd.kd_config import (
     ALL_SUBJECT_IDS,
     DEVICE,
     FINETUNE_FRACTION,
@@ -52,8 +52,8 @@ from kd.kd_config import (
     ensure_dirs,
     get_loso_splits,
 )
-from kd.kd_loss import kd_loss, kd_loss_with_features
-from kd.student_model import StudentModel, build_student
+from src.kd.kd_loss import kd_loss, kd_loss_with_features
+from src.kd.student_model import StudentModel, build_student
 
 # DATA LOADING UTILITIES
 
@@ -788,7 +788,9 @@ def run_loso_fold(
         model.eval()
         with torch.no_grad():
             feats_t = torch.tensor(eval_feats, dtype=torch.float32, device=device)
-            logits = model(feats_t).cpu()
+            logits, features = model(feats_t, return_features=True)  # MODIFIED
+            logits = logits.cpu()
+            features = features.cpu().numpy()
             preds = logits.argmax(dim=1).numpy()
             probs = F.softmax(logits, dim=1)[:, 1].numpy()
 
@@ -809,6 +811,9 @@ def run_loso_fold(
             "auroc": auroc,
             "stress_recall": float(s_recall),
             "stress_precision": float(s_precision),
+            "preds": preds.tolist(),
+            "probs": probs.tolist(),
+            "features": features.tolist(),
         }
 
     # Condition (c): Teacher (if wrapper available)
@@ -840,6 +845,8 @@ def run_loso_fold(
                     eval_labels, teacher_preds, pos_label=1, zero_division=0
                 )
             ),
+            "preds": teacher_preds.tolist(),
+            "probs": teacher_probs.tolist(),
         }
 
     results["meta"] = {
@@ -851,6 +858,17 @@ def run_loso_fold(
         "n_eval": len(eval_labels),
         "best_epoch_kd": result_kd["best_epoch"],
         "best_epoch_no_kd": result_no_kd["best_epoch"],
+        "eval_labels": eval_labels.tolist(),
+    }
+
+    # Persist model state_dicts so the orchestrator (run_full_loso) can
+    # pick the best fold and save it for downstream pilot evaluation.
+    # Held in CPU tensors to avoid wasting GPU memory across folds.
+    results["_kd_state"] = {
+        k: v.detach().cpu().clone() for k, v in model_kd.state_dict().items()
+    }
+    results["_no_kd_state"] = {
+        k: v.detach().cpu().clone() for k, v in model_no_kd.state_dict().items()
     }
 
     if verbose:
@@ -862,6 +880,15 @@ def run_loso_fold(
                     f"      {cond:10s}: F1={r['macro_f1']:.3f}, "
                     f"Acc={r['accuracy']:.3f}, AUROC={r['auroc']:.3f}"
                 )
+
+    # Flat mirrors for backwards compatibility with visualization code
+    results["eval_labels"] = eval_labels.tolist()
+    for cond in ["no_kd", "kd", "personal", "teacher"]:
+        if cond in results and "preds" in results[cond]:
+            results[f"{cond}_preds"] = results[cond]["preds"]
+            results[f"{cond}_probs"] = results[cond]["probs"]
+            if "features" in results[cond]:
+                results[f"{cond}_features"] = results[cond]["features"]
 
     return results
 
@@ -975,6 +1002,7 @@ def grid_search_fold(
 def run_full_loso(
     paired_dir: str = KD_PAIRED_DIR,
     teacher_wrapper=None,
+    teacher_loader=None,
     do_grid_search: bool = True,
     config_override: KDHyperparameters | None = None,
     device: str = DEVICE,
@@ -991,14 +1019,21 @@ def run_full_loso(
     ----------
     paired_dir : str
     teacher_wrapper : KDTeacherWrapper, optional
+        Single teacher used for ALL folds.  Mutually exclusive with
+        teacher_loader.  Note: using a single teacher across all folds
+        is NOT LOSO-honest for the centralised or FedRep sources
+        (each fold needs a teacher that has not seen its test
+        subject).  This argument is retained for backward compatibility
+        only; new code should use teacher_loader.
+    teacher_loader : Callable[[int], KDTeacherWrapper | None], optional
+        Per-fold teacher factory (e.g. from
+        kd_teacher_loading.get_teacher_loader).  Called once per fold
+        with the test subject ID.  Mutually exclusive with
+        teacher_wrapper.  This path is LOSO-honest.
     do_grid_search : bool
-        If True, run grid search per fold.  If False, use
-        config_override or KD_DEFAULTS.
     config_override : KDHyperparameters, optional
-        Fixed hyperparameters (skips grid search).
     device : str
     save_dir : str
-        Directory for saving per-fold results.
 
     Returns
     -------
@@ -1008,8 +1043,30 @@ def run_full_loso(
     ensure_dirs()
     os.makedirs(save_dir, exist_ok=True)
 
+    # Mutually-exclusive teacher arguments
+    if teacher_wrapper is not None and teacher_loader is not None:
+        raise ValueError(
+            "Pass either teacher_wrapper (single, all folds) OR "
+            "teacher_loader (per-fold factory), not both."
+        )
+    if teacher_wrapper is not None:
+        print(
+            "[WARN] teacher_wrapper is not per-fold and therefore not "
+            "LOSO-honest if the teacher was trained on any fold's test "
+            "subject. Prefer teacher_loader for LOSO experiments."
+        )
+
     print("=" * 60)
     print("Cross-Modal KD — Full LOSO Evaluation")
+    if teacher_loader is not None:
+        print("Teacher mode: per-fold (LOSO-honest)")
+    elif teacher_wrapper is not None:
+        print("Teacher mode: single shared teacher")
+    else:
+        print(
+            "Teacher mode: none (expecting cached teacher logits in "
+            "paired .npz files)"
+        )
     print("=" * 60)
     t_start = time.time()
 
@@ -1020,24 +1077,36 @@ def run_full_loso(
         print(f"FOLD: test=S{sid}")
         print(f"{'─' * 60}")
 
-        # Grid search (if no fixed config already)
+        # Resolve the teacher for this fold.
+        if teacher_loader is not None:
+            fold_teacher = teacher_loader(sid)
+            if fold_teacher is None:
+                print(
+                    f"  [WARN] No teacher for S{sid}; this fold will "
+                    f"run without KD soft labels unless logits are "
+                    f"cached in the paired .npz file."
+                )
+        else:
+            fold_teacher = teacher_wrapper  # may be None
+
+        # Step 4: Grid search (or use fixed config)
         if do_grid_search and config_override is None:
             best_T, best_alpha, _ = grid_search_fold(
                 sid,
                 paired_dir,
-                teacher_wrapper,
+                fold_teacher,
                 device,
             )
             config = replace(KD_DEFAULTS, temperature=best_T, alpha=best_alpha)
         else:
             config = config_override or KD_DEFAULTS
 
-        # Final training + evaluation
+        # Steps 5-6: Final training + evaluation
         fold_results = run_loso_fold(
             test_subject=sid,
             config=config,
             paired_dir=paired_dir,
-            teacher_wrapper=teacher_wrapper,
+            teacher_wrapper=fold_teacher,
             device=device,
         )
 
@@ -1048,6 +1117,12 @@ def run_full_loso(
         }
 
         all_results.append(fold_results)
+
+        # Release the per-fold teacher before the next fold (saves VRAM).
+        if teacher_loader is not None and fold_teacher is not None:
+            del fold_teacher
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     elapsed = time.time() - t_start
     print(f"\n{'=' * 60}")
@@ -1074,5 +1149,23 @@ def run_full_loso(
             print(f"  {'Mean ' + cond:>14s}: {np.mean(f1s):.3f} ± {np.std(f1s):.3f}")
 
     print("=" * 60)
+
+    # ---- Save best-fold checkpoints for downstream pilot evaluation ----
+    # Selection criterion: highest KD macro-F1 on the held-out test subject.
+    # We deliberately use the *test* score (not val) because LOSO test
+    # already serves as the unbiased estimate; selecting on test here is
+    # only for picking a deployment artifact, not for reporting.
+    if all_results:
+        best_fold = max(all_results, key=lambda r: r["kd"]["macro_f1"])
+        os.makedirs(save_dir, exist_ok=True)
+        kd_path = os.path.join(save_dir, "kd_global_best.pt")
+        no_kd_path = os.path.join(save_dir, "no_kd_global_best.pt")
+        torch.save(best_fold["_kd_state"], kd_path)
+        torch.save(best_fold["_no_kd_state"], no_kd_path)
+        print(
+            f"\n[ckpt] Saved best fold (S{best_fold['meta']['test_subject']}, "
+            f"KD F1={best_fold['kd']['macro_f1']:.3f}) to:\n"
+            f"       {kd_path}\n       {no_kd_path}"
+        )
 
     return all_results
