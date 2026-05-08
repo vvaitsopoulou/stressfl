@@ -55,7 +55,7 @@ import warnings
 
 import numpy as np
 
-from kd.kd_config import (
+from src.kd.kd_config import (
     EXTENDED_HRV_FEATURES,
     FITBIT_HRV_FEATURES,
     HF_BAND,
