@@ -37,11 +37,11 @@ import json
 import numpy as np
 from scipy.interpolate import CubicSpline
 
-from kd.hrv_feature_extractor import (
+from src.kd.hrv_feature_extractor import (
     extract_primary_features,
     features_to_array,
 )
-from kd.kd_config import (
+from src.kd.kd_config import (
     FITBIT_CALIBRATION_MINUTES,
     FITBIT_MAX_GAP_SEC,
     FITBIT_UNRELIABLE_FRAC,
@@ -93,7 +93,9 @@ def parse_fitbit_json(
         Statistics about the raw sampling: n_samples, duration_s,
         median_interval, max_gap, pct_1sec (% of intervals ≤ 1.5 s).
     """
-    with open(json_path) as f:
+    with open(
+        json_path, encoding="utf-8-sig"
+    ) as f:  # 'utf-8-sig' silently strips BOM if present
         data = json.load(f)
 
     # Navigate to intraday dataset, handle both nested and flat formats
@@ -370,26 +372,52 @@ def extract_windowed_features(
 
 
 # LABEL MAPPING (PILOT PROTOCOL)
-
-# Default pilot protocol
-#   Calibration: 0–5 min baseline, 5–10 min stress A, 10–15 min recovery
-#   Evaluation:  15–20 min baseline, 20–25 min stress B, 25–30 min recovery,
-#                30–35 min journaling, 35–40 min recovery, 40–50 min baseline
+#
+# 22-minute deployment-realistic protocol with two baseline-stress
+# pairs separated by recovery phases.  Restricts conditions to
+# baseline (label=0) and stress (label=1) only — amusement is omitted
+# as the binary stress detection task does not require it.
+#
+# Schedule (relative to recording start):
+#   T1: 0–4   min  baseline-A          (label=0, calibration)
+#   T2: 4–8   min  stressor-A          (label=1, calibration)
+#   T3: 8–11  min  recovery-A          (excluded, label=-1)
+#   T4: 11–15 min  baseline-B          (label=0, evaluation)
+#   T5: 15–19 min  stressor-B          (label=1, evaluation)
+#   T6: 19–22 min  recovery-B          (excluded, label=-1)
+#
+# Recovery phases are excluded from both calibration and evaluation
+# because time-domain HRV typically requires 3–7 minutes to return
+# to baseline after stress termination (Task Force 1996, Mezzacappa
+# et al. 2001); including these windows would introduce label noise.
+#
+# Stressors A and B are intentionally DIFFERENT cognitive tasks
+# (e.g. serial subtraction with verbal feedback / 2-back working
+# memory task) to test that the student detects stress as a
+# physiological state rather than a stressor-specific artefact.
+# This is methodologically stronger than WESAD's single-stressor
+# protocol.
+#
+# Pre-session preparation (NOT part of recorded duration):
+#   - 5 min seated quiet acclimation before recording starts
+#   - No caffeine 4h prior, no exercise 2h prior, no nicotine/alcohol
+#   - Consistent posture, dominant arm rested, no speaking
+#
+# Calibration / evaluation split is enforced via the
+# split_calibration_evaluation() function, which uses
+# FITBIT_CALIBRATION_MINUTES = 8.0 to assign T1+T2 to calibration
+# and T4+T5 to evaluation.  Recovery windows fall in the eval_mask
+# but carry label=-1 and are filtered out by `(labels >= 0)` masks
+# downstream.
 
 DEFAULT_PROTOCOL = [
     # (start_min, end_min, label, phase_name)
-    (0, 5, 0, "calibration_baseline"),
-    (5, 10, 1, "calibration_stress_A"),
-    (10, 15, 0, "calibration_recovery"),
-    (15, 20, 0, "eval_baseline"),
-    (20, 25, 1, "eval_stress_B"),
-    (25, 30, 0, "eval_recovery_1"),
-    (30, 35, -1, "eval_journaling_stressor"),  # TODO REMEMBER To modify this
-    # physiological response is weaker and more variable
-    # than TSST-style cognitive stress.  Excluded from primary evaluation
-    # to avoid contaminating metrics.  Can be analysed separately.
-    (35, 40, 0, "eval_recovery_2"),
-    (40, 50, 0, "eval_final_baseline"),
+    (0, 4, 0, "calibration_baseline"),
+    (4, 8, 1, "calibration_stress_A"),
+    (8, 11, -1, "recovery_A"),
+    (11, 15, 0, "eval_baseline"),
+    (15, 19, 1, "eval_stress_B"),
+    (19, 22, -1, "recovery_B"),
 ]
 
 
