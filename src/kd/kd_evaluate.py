@@ -30,7 +30,7 @@ from sklearn.metrics import (
     # roc_auc_score,
 )
 
-from kd.kd_config import (
+from src.kd.kd_config import (
     # ABLATION_ALPHAS,
     # ABLATION_BETAS,
     # ABLATION_FEATURE_SETS,
@@ -355,6 +355,15 @@ def save_results(
 
     # Convert numpy types for JSON serialisation
     def _convert(obj):
+        # Handle torch tensors (e.g. cached state_dicts)
+        try:
+            import torch
+
+            if isinstance(obj, torch.Tensor):
+                return obj.detach().cpu().numpy().tolist()
+        except ImportError:
+            pass
+
         if isinstance(obj, (np.integer,)):
             return int(obj)
         if isinstance(obj, (np.floating,)):
@@ -362,7 +371,12 @@ def save_results(
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         if isinstance(obj, dict):
-            return {k: _convert(v) for k, v in obj.items()}
+            # Drop private keys (starting with _) — they hold state_dicts, not analysis data
+            return {
+                k: _convert(v)
+                for k, v in obj.items()
+                if not (isinstance(k, str) and k.startswith("_"))
+            }
         if isinstance(obj, list):
             return [_convert(v) for v in obj]
         return obj
