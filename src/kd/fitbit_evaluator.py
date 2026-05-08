@@ -33,6 +33,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from typing import Any
 
 import numpy as np
 from sklearn.metrics import (
@@ -47,11 +48,11 @@ from sklearn.preprocessing import StandardScaler
 import torch
 import torch.nn.functional as F
 
-from kd.fitbit_preprocessor import (
+from src.kd.fitbit_preprocessor import (
     generate_quality_report,
     preprocess_fitbit_session,
 )
-from kd.kd_config import (
+from src.kd.kd_config import (
     DEVICE,
     FINETUNE_LR,
     FINETUNE_STEPS_DEFAULT,
@@ -62,12 +63,13 @@ from kd.kd_config import (
     # PRIMARY_HRV_FEATURES,
     ensure_dirs,
 )
-from kd.kd_trainer import (
+from src.kd.kd_trainer import (
     fit_scaler,
     load_paired_data,
     personalise_head,
 )
-from kd.student_model import StudentModel, build_student
+from src.kd.preprocess_pilot import preprocess_two_session_pilot, summarise
+from src.kd.student_model import StudentModel, build_student
 
 #  1. LOAD WESAD SCALER
 
@@ -312,6 +314,7 @@ def evaluate_fitbit_pilot(
     finetune_steps: int = FINETUNE_STEPS_DEFAULT,
     device: str = DEVICE,
     output_dir: str = KD_RESULTS_DIR,
+    two_session_pilot=False,
 ) -> dict:
     """Run the full Fitbit pilot evaluation pipeline.
 
@@ -345,7 +348,7 @@ def evaluate_fitbit_pilot(
     -------
     dict with all results, timelines, and quality reports.
     """
-    from kd.kd_config import ALL_SUBJECT_IDS
+    from src.kd.kd_config import ALL_SUBJECT_IDS
 
     if train_subject_ids is None:
         train_subject_ids = ALL_SUBJECT_IDS
@@ -358,11 +361,14 @@ def evaluate_fitbit_pilot(
 
     #   Steps 1-3: Preprocess Fitbit data
     print("\n1. Preprocessing Fitbit HR data...")
-    preproc = preprocess_fitbit_session(json_path, session_start)
-
-    # Quality report
-    quality_report = generate_quality_report(preproc)
-    print(quality_report)
+    if two_session_pilot:
+        preproc = preprocess_two_session_pilot(json_path)
+        summarise(preproc)
+        quality_report = "(see two-session summary above)"
+    else:
+        preproc = preprocess_fitbit_session(json_path, session_start)
+        quality_report = generate_quality_report(preproc)
+        print(quality_report)
 
     #  ] Step 4: Normalise with WESAD scaler
     print("\n2. Loading WESAD scaler...")
@@ -435,7 +441,7 @@ def evaluate_fitbit_pilot(
     eval_quality = quality[eval_mask]
     eval_phases = phase_names[eval_mask]
 
-    results = {}
+    results: dict[str, Any] = {}
     conditions = [
         ("no_kd", model_no_kd),
         ("kd", model_kd),
@@ -479,6 +485,23 @@ def evaluate_fitbit_pilot(
 
     #   Prediction timeline (for visualisation)
     print("\n7. Building prediction timeline...")
+    # In two-session mode, hr_uniform/t_uniform are dicts keyed by session.
+    # Concatenate them so the timeline can plot both sessions on a continuous axis.
+    if isinstance(preproc["hr_uniform"], dict):
+        import numpy as np
+
+        cal_t = preproc["t_uniform"]["cal"]
+        eval_t = preproc["t_uniform"]["eval"]
+        cal_hr = preproc["hr_uniform"]["cal"]
+        eval_hr = preproc["hr_uniform"]["eval"]
+        # Offset eval session times so they sit after cal on the timeline
+        eval_t_shifted = eval_t + (cal_t[-1] + 60.0)  # 60 s gap separator
+        t_uniform = np.concatenate([cal_t, eval_t_shifted])
+        hr_uniform = np.concatenate([cal_hr, eval_hr])
+    else:
+        t_uniform = preproc["t_uniform"]
+        hr_uniform = preproc["hr_uniform"]
+
     timeline = _build_prediction_timeline(
         model_personal,
         features_norm,
@@ -486,8 +509,8 @@ def evaluate_fitbit_pilot(
         labels,
         phase_names,
         quality,
-        preproc["hr_uniform"],
-        preproc["t_uniform"],
+        hr_uniform,
+        t_uniform,
         device,
     )
     results["timeline"] = timeline

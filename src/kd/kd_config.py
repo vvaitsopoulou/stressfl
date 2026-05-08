@@ -56,22 +56,64 @@ WESAD_WRIST_PREPROCESSED: str = "data/processed/wesad/wrist_preprocessed.pkl"
 # The teacher was trained on windows produced by wesad_dl_windowing.py,
 # stored under this directory tree.  The paired_data_generator reads
 # signal arrays from here to guarantee byte-identical teacher inputs.
-WESAD_WINDOWED_DIR: str = "data/dl_windowed/"
+WESAD_WINDOWED_DIR: str = "data/processed/wesad/dl_windowed/"
 
 # KD-specific outputs
 KD_OUTPUT_DIR: str = "data/kd/"
 KD_PAIRED_DIR: str = os.path.join(KD_OUTPUT_DIR, "paired/")
+KD_FIGURES_DIR: str = os.path.join(KD_OUTPUT_DIR, "figures/")
+
+# Legacy generic result/checkpoint dirs (kept for any code that still
+# imports them).  New code should use the _FED or _CEN variants below.
 KD_CHECKPOINT_DIR: str = os.path.join(KD_OUTPUT_DIR, "checkpoints/")
 KD_RESULTS_DIR: str = os.path.join(KD_OUTPUT_DIR, "results/")
-KD_FIGURES_DIR: str = os.path.join(KD_OUTPUT_DIR, "figures/")
+
+# Per-teacher-source result and checkpoint directories.  Keeping these
+# separate prevents the ablation run from overwriting primary results.
+KD_CHECKPOINT_DIR_FED: str = os.path.join(KD_OUTPUT_DIR, "checkpoints_fed/")
+KD_CHECKPOINT_DIR_CEN: str = os.path.join(KD_OUTPUT_DIR, "checkpoints_cen/")
+KD_RESULTS_DIR_FED: str = os.path.join(KD_OUTPUT_DIR, "results_fed/")
+KD_RESULTS_DIR_CEN: str = os.path.join(KD_OUTPUT_DIR, "results_cen/")
 
 # Fitbit pilot data
 FITBIT_DATA_DIR: str = "data/fitbit/"
 
-# Teacher checkpoint
-# Path to the trained CNN-LSTM checkpoint Updated at runtime or via CLIand points to the
-# centralised LOSO best-model directory.
-TEACHER_CHECKPOINT_DIR: str = "results/dl/centralised/checkpoints/"
+# Teacher checkpoints — two sources for the dual KD experiment.
+#
+# KD-Fed (primary, privacy-preserving):
+#   Per-fold FedRep warm-start checkpoints.  File layout:
+#     {FEDREP_TEACHER_DIR}/FedRep_fold{sid}_global.pt
+#   Each file is a dict with keys:
+#     - 'global_model_state_dict'          : full WESADFLModel state
+#     - 'federated_mean_head_state_dict'   : (unused here)
+#     - 'algorithm'                        : 'FedRep'
+#   LOSO-honest by construction: each .pt was produced by a federation
+#   run in which the fold's test subject was never a client.
+FEDREP_TEACHER_DIR: str = "production_downloads/fedrep/models_warmstart/"
+
+# KD-Cen (ablation, quantifies privacy tax):
+#   Per-fold centralised CNN-LSTM checkpoints.  File layout:
+#     {CENTRALISED_TEACHER_DIR}/fold_S{sid}/best_model.pt
+#   Each file is a raw state_dict of a CNNLSTM.  LOSO-honest by
+#   construction: wesad_cnnlstm_train.train_loso_cv holds out the fold's
+#   test subject from the training data.
+#
+#   NOTE: the directory name is "wrist_baseline" (not "centralised")
+#   because this is the wrist-signal variant of the centralised
+#   baseline from Iteration 1.  The chest variant lives under
+#   chest_baseline/ but is not used as a KD teacher.
+CENTRALISED_TEACHER_DIR: str = "results/dl/wrist_baseline/"
+
+# Deprecated alias retained for backwards compatibility with any code
+# still importing the old name.  New code should use
+# CENTRALISED_TEACHER_DIR explicitly.
+TEACHER_CHECKPOINT_DIR: str = CENTRALISED_TEACHER_DIR
+
+# Source selector strings.  Pass one of these as the `source` argument
+# to kd_teacher_loading.get_teacher_loader().
+TEACHER_SOURCE_FED: str = "fedrep_warmstart"
+TEACHER_SOURCE_CEN: str = "centralised_cnnlstm"
+VALID_TEACHER_SOURCES: tuple[str, ...] = (TEACHER_SOURCE_FED, TEACHER_SOURCE_CEN)
 
 # WESAD SUBJECT IDS
 
@@ -463,7 +505,7 @@ FINETUNE_STEPS_SEARCH: tuple[int, ...] = (5, 10, 20, 50)
 FINETUNE_FRACTION: float = 0.20  # 20 % of test subject's windows for calibration
 
 # Fitbit pilot personalisation
-FITBIT_CALIBRATION_MINUTES: float = 15.0  # first ~15 min of structured session
+FITBIT_CALIBRATION_MINUTES: float = 8.0  # first ~8 min of structured session
 
 # FITBIT DATA QUALITY PARAMETERS
 # The Fitbit API "1sec detail level" does NOT guarantee uniform 1 Hz.
@@ -509,9 +551,36 @@ def get_paired_data_path(subject_id: int) -> str:
     return os.path.join(KD_PAIRED_DIR, f"S{subject_id}_paired.npz")
 
 
-def get_teacher_checkpoint_path(fold_id: int) -> str:
-    """Return the expected teacher checkpoint for a LOSO fold."""
-    return os.path.join(TEACHER_CHECKPOINT_DIR, f"fold{fold_id}_best.pt")
+def get_teacher_checkpoint_path(
+    fold_id: int,
+    source: str = TEACHER_SOURCE_CEN,
+) -> str:
+    """Return the expected teacher checkpoint path for a LOSO fold.
+
+    Parameters
+    ----------
+    fold_id : int
+        Test subject ID.
+    source : str
+        One of TEACHER_SOURCE_FED or TEACHER_SOURCE_CEN.  Controls
+        which directory and filename convention is used.
+
+    Returns
+    -------
+    str
+        Full path to the expected checkpoint file.  Does NOT check that
+        the file exists; callers should handle missing files.
+    """
+    if source == TEACHER_SOURCE_FED:
+        return os.path.join(FEDREP_TEACHER_DIR, f"FedRep_fold{fold_id}_global.pt")
+    if source == TEACHER_SOURCE_CEN:
+        return os.path.join(
+            CENTRALISED_TEACHER_DIR, f"fold_S{fold_id}", "best_model.pt"
+        )
+    raise ValueError(
+        f"Unknown teacher source: {source!r}. "
+        f"Expected one of: {TEACHER_SOURCE_FED!r}, {TEACHER_SOURCE_CEN!r}."
+    )
 
 
 def get_windowed_dir(window_sec: float = WINDOW_SEC) -> str:
@@ -524,8 +593,12 @@ def ensure_dirs() -> None:
     for d in (
         KD_OUTPUT_DIR,
         KD_PAIRED_DIR,
-        KD_CHECKPOINT_DIR,
-        KD_RESULTS_DIR,
+        KD_CHECKPOINT_DIR,  # legacy
+        KD_CHECKPOINT_DIR_FED,
+        KD_CHECKPOINT_DIR_CEN,
+        KD_RESULTS_DIR,  # legacy
+        KD_RESULTS_DIR_FED,
+        KD_RESULTS_DIR_CEN,
         KD_FIGURES_DIR,
     ):
         os.makedirs(d, exist_ok=True)
