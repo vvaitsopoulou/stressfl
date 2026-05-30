@@ -5,239 +5,156 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Author:** Vasiliki Anna Vaitsopoulou  
-> **Institution:** City College, University of York Europe Campus  
-> **Project Type:** Individual BSc Dissertation Project  
-> **Timeline:** November 2025 - May 2026
+- **Author:** Vasiliki Anna Vaitsopoulou
+- **Institution:** City College, University of York Europe Campus
+- **Project type:** Individual BSc dissertation project
+- **Timeline:** November 2025 – May 2026
 
-## 📋 Overview
+This repository contains the code accompanying a BSc dissertation. The project addresses a practical question: whether a stress-detection model trained on research-grade laboratory sensors can be adapted to operate on a consumer wristband suitable for everyday use, without ever centralising participants' physiological data.
 
-This project explores how Federated Learning (FL) combined with personalization techniques enables privacy-preserving stress prediction models trained on biometric data from wearables. The work bridges the gap between research-grade physiological datasets and consumer-level wearable devices with limited sensing capabilities.
+The repository is research code. It was developed across three iterations, and several components are driven by configuration files rather than a unified command-line interface. Two experiments were deliberately omitted for scope; these are noted below. Throughout, we have tried to document clearly what the system does and does not do.
 
-### Key Objectives
+## Overview
 
-- Train a baseline global model on the WESAD dataset (research-grade sensors)
-- Implement a federated learning pipeline treating each subject as a separate client
-- Develop personalization techniques for cross-sensor adaptation
-- Validate the approach using consumer-grade Fitbit Charge 6 data
-- Demonstrate privacy-accuracy tradeoffs in real-world deployment
+The work proceeds in three stages, each building on the previous one.
 
-## 🏗️ Project Structure
+1. **A baseline on WESAD.** WESAD is a laboratory dataset providing chest (RespiBAN) and wrist (Empatica E4) recordings for fifteen subjects. We begin with a classical random-forest pipeline over hand-engineered features, followed by a CNN-LSTM trained on the raw windowed signals. Both are evaluated under a leave-one-subject-out (LOSO) protocol, which establishes the performance ceiling that the later stages aim to preserve.
+
+2. **Federated learning, one client per subject.** Rather than training on pooled data, each of the fifteen subjects is treated as a separate client, and the raw signals never leave the client. We implemented and compared four approaches — FedAvg, FedRep, BABU, and PeFLL, the last of which learns a hypernetwork that generates per-client model weights — against the centralised baseline. The per-subject results are the most informative: several folds that the centralised model handled well (S9, S13, S14) are precisely where personalization provides the clearest benefit.
+
+3. **Distillation to a consumer device.** A Fitbit Charge 6 offers little beyond heart rate; it has neither a chest strap nor the sensing range of a research-grade wristband. The federated model therefore serves as a teacher, and knowledge distillation is used to train a compact student that requires only the features a Fitbit can supply. The student is then evaluated against intraday Charge 6 recordings. This is the bridge referred to in the title: the federated model is the research-grade artefact, and the distilled student is the form that could plausibly run on consumer hardware.
+
+A live demonstration dashboard (FastAPI and React) streams predictions over a WebSocket. It is a prototype and remains under development; see the closing note.
+
+## Project structure
+
+The reconstructed layout is given below; run `git ls-files` for the exact current tree.
 
 ```
 .
-├── data/                          # Data directory (gitignored)
-│   ├── raw/                       # Raw WESAD dataset
-│   ├── processed/                 # Preprocessed features
-│   └── fitbit/                    # Personal Fitbit data
-├── src/                           # Source code
-│   ├── data/                      # Data loading and preprocessing
-│   │   ├── wesad_loader.py
-│   │   ├── fitbit_loader.py
-│   │   └── preprocessing.py
-│   ├── models/                    # Neural Network Architectures
-│   │   ├── stress_net.py          # The core architecture  
-│   │   └── transfer_heads.py      # Personalization layers (frozen/unfrozen parts)
-│   ├── federated/                 # FL System Logic
-│   │   ├── client.py              # Virtual client logic
-│   │   ├── server.py              # Aggregation logic
-│   │   └── strategies.py          # FedAvg, FedProx, etc.
-│   ├── training/                  # Training loops
-│   │   ├── train_baseline.py
-│   │   ├── train_federated.py
-│   │   └── train_personalized.py
-│   ├── evaluation/                # Evaluation metrics and plots
-│   │   ├── metrics.py
-│   │   └── visualization.py
-│   └── utils/                     # Utility functions
-│       ├── config.py
-│       └── logging_utils.py
-├── notebooks/                     # Jupyter notebooks for exploration
-│   ├── 01_data_exploration.ipynb
-│   ├── 02_baseline_experiments.ipynb
-│   ├── 03_federated_learning.ipynb
-│   └── 04_personalization.ipynb
-├── configs/                       # Configuration files
-│   ├── baseline_config.yaml
-│   ├── federated_config.yaml
-│   └── personalization_config.yaml
-├── tests/                         # Unit tests
-│   ├── test_data_loading.py
-│   ├── test_models.py
-│   └── test_federated.py
-├── scripts/                       # Standalone scripts
-│   ├── download_wesad.sh
-│   ├── preprocess_data.py
-│   └── run_experiment.py
-├── demo/                          # Demo application
-│   └── streamlit_app.py
-├── docs/                          # Documentation
-│   ├── literature_review.md
-│   ├── methodology.md
-│   └── results.md
-├── requirements.txt               # Python dependencies
-├── pyproject.toml                 # Project configuration (black, pytest, etc.)
-├── .env.example                   # Example environment variables
-├── .gitignore
-├── .gitattributes
-├── .editorconfig
-├── .pre-commit-config.yaml
-├── LICENSE
+├── data/                          # gitignored — no data is committed
+│   ├── raw/                       # WESAD subject pickles (S2…S17)
+│   ├── processed/                 # resampled and merged signals, windowed tensors
+│   └── fitbit/                    # personal Charge 6 exports (excluded from version control)
+├── notebooks/
+│   ├── 01_raw_data_eda.ipynb      # the raw WESAD signals
+│   ├── 02_merged_data_eda.ipynb   # signals after resampling onto a common clock
+│   ├── 03_feature_analysis.ipynb  # feature distributions and leakage checks
+│   └── 04_rf_evaluation.ipynb     # classical baseline results
+├── src/
+│   ├── data/                      # WESAD ingestion and deep-learning preprocessing
+│   │   ├── wesad_metadata_extractor.py
+│   │   ├── wesad_resample_merge.py
+│   │   ├── wesad_dl_preprocess.py
+│   │   ├── wesad_dl_windowing.py
+│   │   └── wesad_dl_dataset.py
+│   ├── ml_pipeline/               # classical random-forest baseline (Iteration 1)
+│   │   ├── preprocessing/         # one module per signal: ecg, eda, emg, bvp, temp, acc, resp
+│   │   ├── feature_selection.py   # tree, k-best, and PCA ablations
+│   │   ├── wesad_windowing.py
+│   │   └── ml_classifier.py
+│   ├── models/
+│   │   ├── wesad_cnnlstm_model.py # the deep baseline
+│   │   └── wesad_fl_model.py      # shared body and swappable head used by the FL clients
+│   ├── fl/                        # federated learning (Iteration 2)
+│   │   ├── clients/               # client_base and client_avg / client_babu / client_rep
+│   │   ├── servers/               # server_base and the corresponding aggregators
+│   │   └── pefll/                 # PeFLL: dedicated client and server, hypernetwork, embedding net
+│   ├── kd/                        # knowledge distillation to Fitbit (Iteration 3)
+│   │   ├── teacher_wrapper.py
+│   │   ├── kd_teacher_loading.py  # reconstructs a teacher from an FL or centralised checkpoint
+│   │   ├── student_model.py
+│   │   ├── kd_trainer.py
+│   │   ├── kd_loss.py
+│   │   ├── paired_data_generator.py
+│   │   ├── fitbit_preprocessor.py
+│   │   ├── hrv_feature_extractor.py
+│   │   ├── kd_config.py
+│   │   └── fitbit_evaluator.py
+│   ├── training/
+│   │   ├── wesad_cnnlstm_train.py
+│   │   └── wesad_cnnlstm_evaluate.py
+│   └── utils/
+│       ├── fl_config.py           # federated hyperparameters
+│       ├── metrics.py
+│       ├── result_store.py        # the FoldResult format in which results are saved
+│       ├── wesad_fl_dataset.py
+│       └── utils.py
+├── dashboard/                     # live demonstration: FastAPI backend and React/Vite frontend
+├── scripts/                       # diagnostics, result loaders, and teacher-verification helpers
+├── wesad_chest_configuration.json # signal and feature configuration, chest device
+├── wesad_wrist_configuration.json # signal and feature configuration, wrist device
+├── demo.ipynb
+├── demo_colab_version.ipynb
 └── README.md
 ```
 
-## 🚀 Getting Started
+A note on configuration: the project does not use YAML. Federated runs are configured in `src/utils/fl_config.py`, distillation in `src/kd/kd_config.py`, and the WESAD signal and feature settings in the two `*_configuration.json` files. These are the files to edit when changing an experiment.
 
-### Prerequisites
+## Installation
 
-- Python 3.10 or higher
-- CUDA-capable GPU (recommended for training)
-- ~10GB disk space for datasets
+The project requires Python 3.10 or later and, in practice, a CUDA-capable GPU for any deep-learning training. WESAD together with the intermediate tensors requires approximately 10 GB of disk space.
 
-### Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/vvaitsopoulou/stressfl.git
-   cd federated-stress-prediction
-   ```
-
-2. **Create a virtual environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Set up environment variables**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configurations
-   ```
-
-5. **Download the WESAD dataset**
-   ```bash
-   # Visit: https://archive.ics.uci.edu/dataset/465/wesad+wearable+stress+and+affect+detection
-   # Place the dataset in data/raw/wesad/
-   # Or use the download script:
-   bash scripts/download_wesad.sh
-   ```
-
-6. **Preprocess the data**
-   ```bash
-   python scripts/preprocess_data.py --config configs/baseline_config.yaml
-   ```
-
-### Quick Start
-
-Run the baseline model training:
 ```bash
-python src/training/train_baseline.py --config configs/baseline_config.yaml
+git clone https://github.com/vvaitsopoulou/stressfl.git
+cd stressfl
+
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+
+pip install -r requirements.txt
 ```
 
-## 📊 Experiments
+WESAD is not redistributable and must be obtained directly from the [UCI repository](https://archive.ics.uci.edu/dataset/465/wesad+wearable+stress+and+affect+detection); the per-subject folders should be placed in `data/raw/wesad/`. The Fitbit evaluation uses personal Charge 6 exports, which are not included in the repository for privacy reasons; the distillation and evaluation stages expect them under `data/fitbit/`.
 
-### Iteration 1: Baseline Model (Nov 9 - Dec 18, 2025)
-- Literature review and dataset exploration
-- Train baseline stress detection model on WESAD
-- Evaluate on standard metrics (accuracy, F1, ROC-AUC)
+## Reproducing the experiments
 
-**Run:**
+Most preprocessing and training stages can be run as modules. Only CNN-LSTM training and the classical windowing step expose a full command-line interface; the remaining stages read their settings from the configuration files described above.
+
+**Data preparation** (extract, resample and merge, then window):
+
 ```bash
-python src/training/train_baseline.py
+python -m src.data.wesad_metadata_extractor
+python -m src.data.wesad_resample_merge
+python -m src.data.wesad_dl_preprocess
+python -m src.data.wesad_dl_windowing
 ```
 
-### Iteration 2: Federated Learning Pipeline (Dec 19 - Feb 2, 2026)
-- Implement FedAvg algorithm
-- Simulate 15 clients (one per WESAD subject)
-- Evaluate privacy-accuracy tradeoffs
+**Iteration 1 — baselines.** The classical random-forest pipeline runs from `src.ml_pipeline` and the JSON configurations. The CNN-LSTM exposes explicit flags:
 
-**Run:**
 ```bash
-python src/training/train_federated.py --n_clients 15 --rounds 100
+python -m src.training.wesad_cnnlstm_train \
+    --device-type wrist --window 60 \
+    --windowed-dir data/processed/windowed \
+    --output-dir results/dl/wrist_baseline \
+    --n-classes 2 --batch-size 32 --lr 1e-3 --max-epochs 100 --patience 15
+
+python -m src.training.wesad_cnnlstm_evaluate
 ```
 
-### Iteration 3: Personalization + Demo (Feb 3 - Mar 12, 2026)
-- Apply transfer learning for Fitbit Charge 6 adaptation
-- Fine-tune on personal data
-- Develop Streamlit demo application
+**Iteration 2 — federated learning.** Each run is specified in `src/utils/fl_config.py` (algorithm, number of rounds, client split); the clients and servers under `src/fl/` are driven from that configuration rather than from command-line arguments.
 
-**Run:**
+**Iteration 3 — distillation and Fitbit evaluation.** The paired teacher/student data are generated first, the student is then trained against the loaded teacher checkpoints, and the result is evaluated on the Fitbit data. Distillation settings are defined in `src/kd/kd_config.py`.
+
+**The dashboard** is run separately:
+
 ```bash
-python src/training/train_personalized.py --pretrained checkpoints/federated_model.pth
-streamlit run demo/streamlit_app.py
+cd dashboard/backend && uvicorn main:app --reload      # WebSocket and /health endpoints
+cd dashboard/frontend && npm install && npm run dev     # React/Vite
 ```
 
-## 🧪 Testing
+Where a stage does not expose a command-line entry point, the analysis notebooks and the helper scripts in `scripts/` document how each was invoked end to end.
 
-Run the test suite:
-```bash
-pytest tests/ -v --cov=src
-```
+## Results
 
-Run specific test categories:
-```bash
-pytest tests/test_models.py -v
-```
+Detailed results, figures, and the per-subject analysis are reported in `docs/` and in the dissertation rather than here, so that this document need not be revised after each run. In summary, federated personalization recovers most of the centralised LOSO performance while keeping data on-device, and the distilled student performs well enough on Fitbit-derived features to support the feasibility of the proposed bridge.
 
-## 📈 Results
+Two limitations should be stated plainly. The chest deep-learning baseline was not run to completion — only a single fold exists — and was excluded on the grounds that the literature consistently reports a small chest-versus-wrist performance gap and that the wrist is the intended deployment target. In addition, the dashboard currently uses a synthetic data source; the replay and live Fitbit feeds are stubbed rather than implemented.
 
-Results will be documented in `docs/results.md` and include:
-- Baseline model performance on WESAD
-- Federated learning convergence analysis
-- Personalization improvements
-- Privacy-accuracy tradeoff analysis
-- Cross-sensor performance comparison
+## Acknowledgments
 
-## 🔧 Configuration
+This work relies on the WESAD dataset:
 
-All experiments are configured via YAML files in `configs/`. Key parameters:
-
-```yaml
-# Example: configs/baseline_config.yaml
-model:
-  architecture: "lstm"
-  hidden_size: 128
-  num_layers: 2
-  dropout: 0.3
-
-training:
-  batch_size: 32
-  learning_rate: 0.001
-  epochs: 50
-  optimizer: "adam"
-
-data:
-  window_size: 60  # seconds
-  overlap: 0.5
-  features: ["eda", "bvp", "temp", "acc"]
-```
-
-## 📝 Documentation
-
-- [Literature Review](docs/literature_review.md)
-- [Methodology](docs/methodology.md)
-- [Results & Analysis](docs/results.md)
-- [API Documentation](docs/api_documentation.md)
-
-## 🤝 Contributing
-
-This is an individual dissertation project, but feedback and suggestions are welcome! If you notice any issues or have suggestions:
-
-1. Open an issue describing the problem/suggestion
-2. For code contributions, feel free to fork and submit a pull request
-
-## 📜 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- This project relies on the WESAD dataset:
 ```bibtex
 @inproceedings{wesad2018,
   title={Introducing WESAD, a multimodal dataset for wearable stress and affect detection},
@@ -247,15 +164,16 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
   year={2018}
 }
 ```
-- **Federated Learning:** Inspired by research from Google, OpenMined, and the FL community
-- **Supervisor:** [Miltos Vafiadis]
 
-## 📧 Contact
+The federated and distillation methods draw on the FedAvg, FedRep, BABU, and PeFLL literature; the PeFLL hypernetwork formulation in particular informed the design of the personalized variant. We thank our supervisor, Miltos Vafiadis, for guidance on the scope of the project.
+
+## License
+
+Released under the MIT License; see [LICENSE](LICENSE). The implementation is free to reuse. The dissertation text itself is submitted separately through the university and is not covered by this license.
+
+## Contact
 
 **Vasiliki Anna Vaitsopoulou**
-- Email: vvaitsopoulou@york.citycollege.eu / vaisanna97@gmail.com
-- LinkedIn: [[vasiliki-anna-vaitsopoulou](https://www.linkedin.com/in/vasiliki-anna-vaitsopoulou-b23bb8303/)]
-- Project Link: https://github.com/vvaitsopoulou/stressfl
- 
-
-**Note:** This repository contains the implementation code for a Bachelor's dissertation project. The final dissertation document will be submitted separately through university channels.
+- vvaitsopoulou@york.citycollege.eu / vaisanna97@gmail.com
+- [LinkedIn](https://www.linkedin.com/in/vasiliki-anna-vaitsopoulou-b23bb8303/)
+- https://github.com/vvaitsopoulou/stressfl

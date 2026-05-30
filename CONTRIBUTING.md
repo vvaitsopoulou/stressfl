@@ -1,271 +1,81 @@
-# Contributing to Federated Stress Prediction
+# Contributing
 
-Thank you for your interest in this project! While this is an individual dissertation project, feedback, suggestions, and contributions are welcome.
+This is an individual BSc dissertation project. Development is carried out by the author, and code contributions are unlikely to be merged while the work is under assessment, since academic-integrity requirements mean that the submitted work must remain clearly our own. The repository is nonetheless public by design, and several forms of input are valuable:
 
-## 📝 Note on Individual Project
+- **Bug reports.** If something does not run, or runs but produces a clearly incorrect result, we would like to know.
+- **Questions about the method.** If part of the federated-learning or distillation setup is unclear, that is usually a sign that the documentation needs improvement.
+- **Corrections.** Statistical, methodological, or data-leakage issues are the most valuable feedback of all.
 
-This is a Bachelor's dissertation project by Vasiliki Anna Vaitsopoulou. The primary development will be done by the author, but:
+Feature requests are welcome, but the scope is fixed by the dissertation, and most will not be incorporated before submission.
 
-- **Bug reports** are very welcome
-- **Feature suggestions** that align with the project scope are appreciated
-- **Code contributions** can be submitted but may not be merged immediately due to academic integrity requirements
-- **Documentation improvements** are always helpful
+## Reporting an issue
 
-## 🐛 Reporting Issues
+Please open an [issue](https://github.com/vvaitsopoulou/stressfl/issues). A brief check that the problem is not already listed saves duplicated effort. A useful report states what was done, what was expected, what occurred, and the environment in which it occurred (operating system, Python version, and, where possible, the error text). For a numerical or result-related issue, the relevant configuration or the affected fold is particularly helpful.
 
-If you find a bug or have a suggestion:
+## Setting up the environment
 
-1. Check if the issue already exists in the [Issues](https://github.com/vvaitsopoulou/stressfl/issues) tab
-2. If not, create a new issue with:
-   - A clear, descriptive title
-   - Steps to reproduce (for bugs)
-   - Expected vs. actual behavior
-   - Your environment (Python version, OS, etc.)
-   - Relevant code snippets or error messages
-
-## 💡 Suggesting Features
-
-For feature requests:
-
-1. Check existing issues to avoid duplicates
-2. Explain the use case and why it would be valuable
-3. Consider whether it aligns with the dissertation scope
-
-## 🔧 Development Setup
-
-If you want to contribute code or experiment with the project:
-
-### 1. Fork and Clone
+The setup mirrors the README:
 
 ```bash
 git clone https://github.com/vvaitsopoulou/stressfl.git
 cd stressfl
-```
 
-### 2. Set up Virtual Environment
-
-```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-### 3. Install Dependencies
-
-```bash
-# Core dependencies
+source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
-# Development tools
-pip install -e ".[dev]"
-
-# Optional: Jupyter, monitoring, demo
-pip install -e ".[jupyter,monitoring,demo]"
 ```
 
-### 4. Install Pre-commit Hooks
+We then recommend installing the pre-commit hooks, since the checks described below are enforced on commit and are far easier to address early:
 
 ```bash
 pre-commit install
 ```
 
-### 5. Set up Environment Variables
+## Code style and checks
+
+The pre-commit pipeline runs on every commit and is the authoritative definition of a clean change. It comprises:
+
+- **Black** for formatting (line length 88).
+- **Ruff** for linting (replacing flake8, isort, and related tools).
+- **MyPy** for type checking.
+- **Bandit** for security analysis. This is the reason `torch.load` is called with `weights_only=True`, and why an occasional, justified `# nosec` annotation appears.
+
+The full pipeline can be run manually:
 
 ```bash
-cp .env.example .env
-# Edit .env with your configurations
-```
-
-## 🧪 Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=src --cov-report=html
-
-# Run specific test file
-pytest tests/test_models.py -v
-
-# Run only fast tests (skip slow/GPU tests)
-pytest -m "not slow and not gpu"
-```
-
-## 🎨 Code Style
-
-This project uses several tools to maintain code quality:
-
-- **Black** for code formatting (line length: 88)
-- **Ruff** for linting (replaces flake8, isort, etc.)
-- **MyPy** for type checking
-- **Bandit** for security checks
-
-### Format Code
-
-```bash
-# Format all Python files
-black src/ tests/
-
-# Check formatting without changing files
-black --check src/ tests/
-```
-
-### Lint Code
-
-```bash
-# Lint with Ruff
-ruff check src/ tests/
-
-# Auto-fix issues where possible
-ruff check --fix src/ tests/
-```
-
-### Type Check
-
-```bash
-mypy src/
-```
-
-### Run All Checks
-
-```bash
-# Pre-commit will run all checks
 pre-commit run --all-files
 ```
 
-## 📋 Coding Guidelines
+or the individual tools:
 
-### Python Style
-
-- Follow [PEP 8](https://pep8.org/)
-- Use Black's default settings (line length 88)
-- Add type hints where reasonable
-- Write docstrings for functions and classes (Google style)
-
-### Example Function
-
-```python
-def train_model(
-    model: torch.nn.Module,
-    train_loader: DataLoader,
-    epochs: int,
-    device: str = "cuda",
-) -> dict[str, float]:
-    """Train a PyTorch model.
-
-    Args:
-        model: The neural network model to train.
-        train_loader: DataLoader containing training data.
-        epochs: Number of training epochs.
-        device: Device to train on ('cuda' or 'cpu').
-
-    Returns:
-        Dictionary containing training metrics (loss, accuracy, etc.).
-
-    Raises:
-        ValueError: If epochs is less than 1.
-    """
-    if epochs < 1:
-        raise ValueError("Epochs must be at least 1")
-
-    # Training logic here
-    metrics = {"loss": 0.0, "accuracy": 0.0}
-    return metrics
-```
-
-### Commit Messages
-
-Follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
-
-```
-<type>(<scope>): <description>
-
-[optional body]
-
-[optional footer]
-```
-
-**Types:**
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation changes
-- `style`: Code style changes (formatting, etc.)
-- `refactor`: Code refactoring
-- `test`: Adding or updating tests
-- `chore`: Maintenance tasks
-
-**Examples:**
 ```bash
-feat(federated): add FedProx aggregation algorithm
-fix(data): handle missing values in WESAD preprocessing
-docs(readme): update installation instructions
-test(models): add unit tests for baseline model
+black src/
+ruff check src/          # add --fix to apply automatic corrections
+mypy src/
 ```
 
-## 🔀 Pull Request Process
+We aim for type hints where they add clarity, Google-style docstrings on non-trivial functions, and small, readable functions in preference to clever ones. Where Ruff reports an unused loop variable, our convention is to rename it with a leading underscore rather than to suppress the rule.
 
-1. **Fork the repository** and create a feature branch:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
+## A note on testing
 
-2. **Make your changes** following the coding guidelines
+There is no formal `pytest` suite. As is common for research code, correctness is verified through the exploratory and evaluation notebooks (`notebooks/`) and the verification scripts in `scripts/`, in particular the teacher-checking and leakage-diagnostic scripts. A small, fast, deterministic test is welcome for any new component with a clear correctness criterion, but coverage of the full pipeline is not expected.
 
-3. **Write tests** for new functionality
+## Commit messages
 
-4. **Ensure all checks pass:**
-   ```bash
-   pre-commit run --all-files
-   pytest
-   ```
+We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification, for example:
 
-5. **Update documentation** if needed
+```
+fix(kd): switch torch.load to weights_only=True to satisfy bandit
+feat(fl): add PeFLL hypernetwork client
+docs(readme): rewrite structure section to match the actual layout
+```
 
-6. **Commit your changes** with clear commit messages
+The types in use are `feat`, `fix`, `docs`, `style`, `refactor`, `test`, and `chore`. Subject lines should be concise and written in the imperative mood.
 
-7. **Push to your fork:**
-   ```bash
-   git push origin feature/your-feature-name
-   ```
+## Pull requests
 
-8. **Create a Pull Request** with:
-   - Clear description of changes
-   - Link to related issues
-   - Screenshots/examples if applicable
+To contribute a fix, please fork the repository, branch from `develop`, and ensure that `pre-commit run --all-files` passes before opening a pull request. Describe the problem and the change, and reference the relevant issue where one exists. Pull requests will be reviewed, subject to the constraint noted above regarding what can be merged prior to submission.
 
-### PR Checklist
+## Questions
 
-- [ ] Code follows project style guidelines
-- [ ] All tests pass
-- [ ] New tests added for new functionality
-- [ ] Documentation updated
-- [ ] Commit messages are clear and follow conventions
-- [ ] No merge conflicts with main branch
-
-## 📚 Project Structure
-
-When adding new code, follow the existing structure:
-
-- `src/data/`: Data loading and preprocessing
-- `src/models/`: Model architectures
-- `src/federated/`: Federated learning logic
-- `src/training/`: Training scripts
-- `src/evaluation/`: Metrics and visualization
-- `tests/`: Unit and integration tests
-- `notebooks/`: Exploratory Jupyter notebooks
-- `configs/`: YAML configuration files
-
-## ❓ Questions?
-
-Feel free to:
-- Open an issue for questions
-- Reach out via email: vaisanna97@gmail.com
-- Check the [Discussions](https://github.com/vvaitsopoulou/stressfl/discussions) tab
-
-## 🙏 Acknowledgments
-
-Thank you for helping improve this project! Every contribution, no matter how small, is valued.
-
-## 📄 License
-
-By contributing, you agree that your contributions will be licensed under the MIT License.
+The simplest route is to open an issue, or to contact the author at vaisanna97@gmail.com. Even a brief report — for example, that a command in the README does not work as written — is genuinely helpful.
