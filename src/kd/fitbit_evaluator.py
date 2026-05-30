@@ -61,6 +61,7 @@ from src.kd.kd_config import (
     KD_RESULTS_DIR,
     # N_PRIMARY_FEATURES,
     # PRIMARY_HRV_FEATURES,
+    WINDOW_SEC,
     ensure_dirs,
 )
 from src.kd.kd_trainer import (
@@ -381,7 +382,7 @@ def evaluate_fitbit_pilot(
     cal_mask = preproc["cal_mask"]
     eval_mask = preproc["eval_mask"]
     phase_names = preproc["phase_names"]
-    timestamps = preproc["timestamps"]
+    # timestamps = preproc["timestamps"]
 
     # Calibration / evaluation feature sets
     cal_feats = features_norm[cal_mask & quality & (labels >= 0)]
@@ -483,37 +484,11 @@ def evaluate_fitbit_pilot(
         )
     results["per_phase"] = phase_results
 
-    #   Prediction timeline (for visualisation)
+    #   Prediction timeline (per session, cropped to the labelled protocol)
     print("\n7. Building prediction timeline...")
-    # In two-session mode, hr_uniform/t_uniform are dicts keyed by session.
-    # Concatenate them so the timeline can plot both sessions on a continuous axis.
-    if isinstance(preproc["hr_uniform"], dict):
-        import numpy as np
-
-        cal_t = preproc["t_uniform"]["cal"]
-        eval_t = preproc["t_uniform"]["eval"]
-        cal_hr = preproc["hr_uniform"]["cal"]
-        eval_hr = preproc["hr_uniform"]["eval"]
-        # Offset eval session times so they sit after cal on the timeline
-        eval_t_shifted = eval_t + (cal_t[-1] + 60.0)  # 60 s gap separator
-        t_uniform = np.concatenate([cal_t, eval_t_shifted])
-        hr_uniform = np.concatenate([cal_hr, eval_hr])
-    else:
-        t_uniform = preproc["t_uniform"]
-        hr_uniform = preproc["hr_uniform"]
-
-    timeline = _build_prediction_timeline(
-        model_personal,
-        features_norm,
-        timestamps,
-        labels,
-        phase_names,
-        quality,
-        hr_uniform,
-        t_uniform,
-        device,
+    results["timeline"] = build_pilot_timeline(
+        model_personal, preproc, features_norm, device
     )
-    results["timeline"] = timeline
 
     #   Package results
     results["meta"] = {
@@ -580,18 +555,171 @@ def evaluate_fitbit_pilot(
 
 
 #  6. VISUALISATION HELPERS
+#
+#  Per-session, protocol-cropped prediction timeline.
+#
+#  The Fitbit API returns the whole day's intraday HR, so the raw timeline
+#  spans many hours with the labelled protocol squished near t=0. In the
+#  two-session pilot, hr_uniform / t_uniform are dicts keyed by session and
+#  each session is rebased to its own session_start, so window timestamps and
+#  the 1 Hz HR grid share a consistent per-session axis. These helpers crop
+#  each session to its labelled span (+pad) and render the sessions as
+#  separate panels rather than overlaying them on one axis.
+#
+#  Metrics are unaffected -- this only changes results["timeline"] and the plot.
+
+
+def _session_timeline(
+    model: StudentModel,
+    feats_norm: np.ndarray,
+    ts: np.ndarray,
+    labels: np.ndarray,
+    phases: np.ndarray,
+    quality: np.ndarray,
+    hr_t: np.ndarray,
+    hr_v: np.ndarray,
+    device: str,
+    pad_s: float = 60.0,
+) -> dict:
+    """Build a single session's timeline, cropped to the labelled span.
+
+    All arrays passed in are session-local (rebased to that session's
+    session_start), so the window timestamps and the 1 Hz HR grid share one
+    consistent time axis -- no cross-session shifting.
+    """
+    n = len(feats_norm)
+    probs = np.full(n, np.nan)
+    preds = np.full(n, np.nan)
+
+    if quality.any():
+        model.eval()
+        with torch.no_grad():
+            x = torch.tensor(feats_norm[quality], dtype=torch.float32, device=device)
+            logits = model(x).cpu()
+            probs[quality] = F.softmax(logits, dim=1)[:, 1].numpy()
+            preds[quality] = logits.argmax(dim=1).numpy()
+
+    # Crop to the labelled protocol span (+pad). Falls back to full range if,
+    # for some reason, there are no labelled windows.
+    lab = np.where(labels >= 0)[0]
+    if len(lab):
+        t0 = float(ts[lab].min()) - pad_s
+        t1 = float(ts[lab].max()) + WINDOW_SEC + pad_s
+    else:
+        t0, t1 = float(ts.min()), float(ts.max())
+
+    win_keep = (ts >= t0) & (ts <= t1)
+    hr_keep = (hr_t >= t0) & (hr_t <= t1)
+
+    return {
+        "window_times": ts[win_keep].tolist(),
+        "stress_probs": probs[win_keep].tolist(),
+        "preds": preds[win_keep].tolist(),
+        "true_labels": labels[win_keep].tolist(),
+        "phase_names": np.asarray(phases)[win_keep].tolist(),
+        "hr_times": hr_t[hr_keep].tolist(),
+        "hr_values": hr_v[hr_keep].tolist(),
+        "t0_s": t0,
+        "t1_s": t1,
+    }
+
+
+def build_pilot_timeline(
+    model: StudentModel,
+    preproc: dict,
+    features_norm: np.ndarray,
+    device: str = DEVICE,
+    pad_s: float = 60.0,
+) -> dict:
+    """Build the prediction timeline, per session, cropped to the protocol.
+
+    Returns either {"cal": {...}, "eval": {...}} (two-session pilot) or
+    {"single": {...}} (single continuous session).
+    """
+    labels = preproc["labels"]
+    phases = preproc["phase_names"]
+    quality = preproc["quality"]
+    ts = preproc["timestamps"]
+
+    # Two-session pilot: hr_uniform / t_uniform are dicts keyed by session,
+    # and cal_mask / eval_mask select each session's windows.
+    if isinstance(preproc["hr_uniform"], dict):
+        out = {}
+        for key, mask in [("cal", preproc["cal_mask"]), ("eval", preproc["eval_mask"])]:
+            out[key] = _session_timeline(
+                model,
+                features_norm[mask],
+                ts[mask],
+                labels[mask],
+                phases[mask],
+                quality[mask],
+                np.asarray(preproc["t_uniform"][key]),
+                np.asarray(preproc["hr_uniform"][key]),
+                device,
+                pad_s,
+            )
+        return out
+
+    # Single continuous session.
+    return {
+        "single": _session_timeline(
+            model,
+            features_norm,
+            ts,
+            labels,
+            phases,
+            quality,
+            np.asarray(preproc["t_uniform"]),
+            np.asarray(preproc["hr_uniform"]),
+            device,
+            pad_s,
+        )
+    }
+
+
+def _crop_flat(tl: dict, pad_s: float = 60.0) -> dict:
+    """Crop an old flat timeline dict to its labelled span (best-effort).
+
+    Kept for backward compatibility so the plot still works if handed an
+    old-format flat timeline. NOTE: a flat two-session timeline has both
+    sessions concatenated on inconsistent axes; cropping it will overlay
+    them. Prefer build_pilot_timeline(), which keeps sessions separate.
+    """
+    win_t = np.asarray(tl["window_times"], dtype=float)
+    true = np.asarray(tl["true_labels"], dtype=float)
+    hr_t = np.asarray(tl["hr_times"], dtype=float)
+    lab = np.where(true >= 0)[0]
+    if len(lab):
+        t0 = float(win_t[lab].min()) - pad_s
+        t1 = float(win_t[lab].max()) + WINDOW_SEC + pad_s
+    else:
+        t0, t1 = float(win_t.min()), float(win_t.max())
+    wk = (win_t >= t0) & (win_t <= t1)
+    hk = (hr_t >= t0) & (hr_t <= t1)
+    return {
+        "window_times": win_t[wk].tolist(),
+        "stress_probs": np.asarray(tl["stress_probs"])[wk].tolist(),
+        "true_labels": true[wk].tolist(),
+        "hr_times": hr_t[hk].tolist(),
+        "hr_values": np.asarray(tl["hr_values"])[hk].tolist(),
+        "t0_s": t0,
+        "t1_s": t1,
+    }
+
+
 def plot_prediction_timeline(
     results: dict,
     output_path: str | None = None,
 ) -> None:
-    """Plot the prediction timeline: HR + stress probability + labels.
+    """Plot the prediction timeline as one column per session, cropped.
 
-    Parameters
-    ----------
-    results : dict
-        Output of evaluate_fitbit_pilot().
-    output_path : str, optional
-        If provided, saves the figure to this path.
+    Each column shows three stacked panels: HR (BPM), P(stress), and the
+    ground-truth protocol band. Time axes are session-local minutes, so the
+    irrelevant hours between sessions are broken out rather than drawn.
+
+    Backward compatible: also accepts the old flat timeline dict, which it
+    crops to the labelled span before plotting (with the overlay caveat in
+    _crop_flat).
     """
     try:
         import matplotlib
@@ -602,39 +730,71 @@ def plot_prediction_timeline(
         print("  matplotlib required for timeline plot")
         return
 
-    timeline = results["timeline"]
-    hr_t = np.array(timeline["hr_times"]) / 60  # to minutes
-    hr_v = np.array(timeline["hr_values"])
-    win_t = np.array(timeline["window_times"]) / 60
-    probs = np.array(timeline["stress_probs"])
-    true_labels = np.array(timeline["true_labels"])
+    tl = results["timeline"]
 
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+    # Normalise into an ordered list of (column_title, session_dict).
+    if "hr_times" in tl:  # old flat format -> crop on the fly
+        tl = {"single": _crop_flat(tl)}
+    titles = {
+        "cal": "Calibration session (morning)",
+        "eval": "Evaluation session (afternoon)",
+        "single": "Pilot session",
+    }
+    order = [k for k in ("cal", "eval", "single") if k in tl]
+    cols = [(titles[k], tl[k]) for k in order]
+    ncol = len(cols)
 
-    # Panel 1: Heart rate
-    ax1.plot(hr_t, hr_v, color="#4477AA", linewidth=0.5, alpha=0.8)
-    ax1.set_ylabel("HR (BPM)")
-    ax1.set_title("Fitbit Pilot — Prediction Timeline")
+    fig, axes = plt.subplots(
+        3, ncol, figsize=(6.2 * ncol, 7.2), squeeze=False, sharey="row"
+    )
 
-    # Panel 2: Stress probability
-    valid = np.isfinite(probs)
-    ax2.plot(win_t[valid], probs[valid], color="#228833", linewidth=1)
-    ax2.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
-    ax2.set_ylabel("P(stress)")
-    ax2.set_ylim(-0.05, 1.05)
+    for c, (title, s) in enumerate(cols):
+        hr_t = np.asarray(s["hr_times"], dtype=float)
+        hr_v = np.asarray(s["hr_values"], dtype=float)
+        win_t = np.asarray(s["window_times"], dtype=float)
+        probs = np.asarray(s["stress_probs"], dtype=float)
+        true = np.asarray(s["true_labels"], dtype=float)
 
-    # Panel 3: True labels
-    for i, t in enumerate(win_t):
-        if true_labels[i] == 1:
-            ax3.axvspan(t, t + 16 / 60, color="#EE6677", alpha=0.3)
-        elif true_labels[i] == 0:
-            ax3.axvspan(t, t + 16 / 60, color="#4477AA", alpha=0.15)
-    ax3.set_ylabel("Protocol")
-    ax3.set_xlabel("Time (minutes)")
-    ax3.set_yticks([0, 1])
-    ax3.set_yticklabels(["Non-stress", "Stress"])
+        # Rebase each column to its own local zero (minutes from crop start).
+        base = float(s.get("t0_s", win_t.min() if win_t.size else 0.0))
+        hr_m = (hr_t - base) / 60.0
+        win_m = (win_t - base) / 60.0
 
-    fig.tight_layout()
+        ax_hr, ax_p, ax_lab = axes[0][c], axes[1][c], axes[2][c]
+
+        # Panel 1: heart rate
+        ax_hr.plot(hr_m, hr_v, color="#4477AA", linewidth=0.8)
+        ax_hr.set_title(title, fontsize=11)
+        if c == 0:
+            ax_hr.set_ylabel("HR (BPM)")
+
+        # Panel 2: stress probability
+        valid = np.isfinite(probs)
+        ax_p.plot(win_m[valid], probs[valid], color="#228833", linewidth=1.2)
+        ax_p.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+        ax_p.set_ylim(-0.05, 1.05)
+        if c == 0:
+            ax_p.set_ylabel("P(stress)")
+
+        # Panel 3: ground-truth protocol bands (only labelled windows)
+        for i, t in enumerate(win_m):
+            if true[i] == 1:
+                ax_lab.axvspan(t, t + WINDOW_SEC / 60.0, color="#EE6677", alpha=0.35)
+            elif true[i] == 0:
+                ax_lab.axvspan(t, t + WINDOW_SEC / 60.0, color="#4477AA", alpha=0.18)
+        ax_lab.set_yticks([0, 1])
+        ax_lab.set_yticklabels(["Non-stress", "Stress"])
+        ax_lab.set_xlabel("Time within session (min)")
+        if c == 0:
+            ax_lab.set_ylabel("Protocol")
+
+        # Keep each column tight to its cropped span.
+        span = [win_m.min(), win_m.max()] if win_m.size else [hr_m.min(), hr_m.max()]
+        for ax in (ax_hr, ax_p, ax_lab):
+            ax.set_xlim(span[0] - 0.2, span[1] + 0.5)
+
+    fig.suptitle("Fitbit Pilot — Prediction Timeline (N=1)", fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
 
     if output_path:
         fig.savefig(output_path, dpi=300, bbox_inches="tight")
