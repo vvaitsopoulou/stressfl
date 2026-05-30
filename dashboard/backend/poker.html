@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stress Dashboard — WebSocket Poker</title>
+<style>
+  body {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    background: #0b1437;
+    color: #e8eaf3;
+    margin: 0;
+    padding: 16px;
+    font-size: 13px;
+  }
+  h1 { font-size: 14px; margin: 0 0 8px; color: #a3aed0; font-weight: 600; }
+  .controls { margin-bottom: 12px; display: flex; gap: 12px; align-items: center; }
+  button { background: #1f2a5f; color: #e8eaf3; border: 1px solid #2c3a7a;
+           padding: 6px 12px; border-radius: 4px; cursor: pointer; font: inherit; }
+  button:hover { background: #2c3a7a; }
+  .status { padding: 4px 10px; border-radius: 4px; }
+  .status.ok { background: #134e4a; color: #6ee7b7; }
+  .status.bad { background: #4c1d2e; color: #fda4af; }
+  .counters { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+  .counter { background: #11194a; padding: 4px 10px; border-radius: 4px;
+             border: 1px solid #1c275f; }
+  .counter b { color: #c4b5fd; }
+  pre { background: #11194a; border: 1px solid #1c275f; padding: 10px;
+        border-radius: 6px; max-height: 80vh; overflow: auto;
+        white-space: pre-wrap; word-break: break-all; }
+  .row { padding: 2px 0; border-bottom: 1px solid #1c275f33; }
+  .t-hello { color: #6ee7b7; }
+  .t-hr_sample { color: #93c5fd; }
+  .t-prediction { color: #c4b5fd; }
+  .t-quality_update { color: #fcd34d; }
+  .t-system_event { color: #fda4af; }
+</style>
+</head>
+<body>
+  <h1>WebSocket protocol v1 poker — connect to ws://127.0.0.1:8000/ws/live</h1>
+  <div class="controls">
+    <button id="connect">Connect</button>
+    <button id="disconnect">Disconnect</button>
+    <button id="clear">Clear log</button>
+    <span id="status" class="status bad">disconnected</span>
+  </div>
+  <div class="counters" id="counters"></div>
+  <pre id="log"></pre>
+
+<script>
+let ws = null;
+const counts = {};
+const logEl = document.getElementById('log');
+const countersEl = document.getElementById('counters');
+const statusEl = document.getElementById('status');
+
+function setStatus(text, ok) {
+  statusEl.textContent = text;
+  statusEl.className = 'status ' + (ok ? 'ok' : 'bad');
+}
+
+function renderCounters() {
+  countersEl.innerHTML = '';
+  for (const [k, v] of Object.entries(counts).sort()) {
+    const div = document.createElement('div');
+    div.className = 'counter';
+    div.innerHTML = `${k}: <b>${v}</b>`;
+    countersEl.appendChild(div);
+  }
+}
+
+function appendRow(msg) {
+  const t = msg.type;
+  counts[t] = (counts[t] || 0) + 1;
+  renderCounters();
+  // Render a one-line summary, full JSON in title.
+  let summary;
+  if (t === 'hello') {
+    summary = `hello session=${msg.session_id} source=${msg.data_source}`;
+  } else if (t === 'hr_sample') {
+    const s = msg.samples[0];
+    summary = `hr_sample t=${s.t.toFixed(0)}s hr=${s.hr} gap=${s.in_gap}`;
+  } else if (t === 'prediction') {
+    const m = msg.models;
+    summary = `prediction win=${msg.window_id} q=${msg.quality_pass} ` +
+              `nokd=${m.no_kd.p_stress.toFixed(2)} ` +
+              `glob=${m.global_kd.p_stress.toFixed(2)} ` +
+              `pers=${m.personalised.p_stress.toFixed(2)}`;
+  } else if (t === 'quality_update') {
+    summary = `quality_update unreliable=${msg.pct_unreliable_windows.toFixed(1)}% ` +
+              `gap=${msg.max_gap_s.toFixed(1)}s`;
+  } else if (t === 'system_event') {
+    summary = `system_event ${msg.event} [${msg.severity}] ${msg.message}`;
+  } else {
+    summary = JSON.stringify(msg);
+  }
+  const row = document.createElement('div');
+  row.className = 'row t-' + t;
+  row.textContent = summary;
+  row.title = JSON.stringify(msg, null, 2);
+  logEl.appendChild(row);
+  // Keep last 500 rows
+  while (logEl.children.length > 500) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+document.getElementById('connect').onclick = () => {
+  if (ws) return;
+  ws = new WebSocket('ws://127.0.0.1:8000/ws/live');
+  setStatus('connecting…', false);
+  ws.onopen = () => setStatus('connected', true);
+  ws.onclose = () => { setStatus('disconnected', false); ws = null; };
+  ws.onerror = () => setStatus('error', false);
+  ws.onmessage = (ev) => {
+    try { appendRow(JSON.parse(ev.data)); }
+    catch (e) { console.error('bad message', e, ev.data); }
+  };
+};
+
+document.getElementById('disconnect').onclick = () => {
+  if (ws) ws.close();
+  ws = null;
+};
+
+document.getElementById('clear').onclick = () => {
+  logEl.innerHTML = '';
+  for (const k of Object.keys(counts)) delete counts[k];
+  renderCounters();
+};
+</script>
+</body>
+</html>
