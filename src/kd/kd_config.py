@@ -494,9 +494,8 @@ KD_DEFAULTS = KDHyperparameters()
 # IMPLEMENTATION NOTE :
 #   finetune_fraction and fitbit_calibration_minutes are two
 #   fundamentally different protocols.  WESAD personalisation uses
-#   a percentage of test subject windows and the Fitbit pilot uses
-#   a fixed temporal duration.  Need to remember to keep them kept as separate, clearly
-#   documented parameters.
+#   a percentage of test subject windows; the Fitbit pilot uses
+#   a fixed temporal duration.
 
 # WESAD personalisation
 FINETUNE_LR: float = 1e-4  # smaller than KD training (head-only, few samples)

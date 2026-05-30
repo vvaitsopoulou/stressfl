@@ -681,7 +681,6 @@ def _analyse_variability(fold_results: list[dict]) -> dict:
 
     High std across LOSO folds means the model performs very differently
     on different subjects — exactly the problem FL is designed to solve.
-    This is a core narrative element of your dissertation.
     """
     f1s = [r["f1_macro"] for r in fold_results if "f1_macro" in r]
 

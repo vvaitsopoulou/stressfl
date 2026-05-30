@@ -113,7 +113,6 @@ class FedRepDPServer(WESADServer):
         Note!!! this gives the largest δ (weakest privacy)
         because the smallest N produces the largest 1/N.  For the most
         conservative (smallest) δ, one would use 1/max(N_windows).
-        This is a deliberate design choice TODO remember to check again
         """
         super().set_clients(client_class, data_managers)
 

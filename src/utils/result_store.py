@@ -335,7 +335,7 @@ class FoldResult:
     # protocol-change result files.  Consumers should check
     # `has_test_subject_metrics` before using them, or use the
     # backward-compatible `test_subject_final_f1` / `test_subject_loso_f1`
-    # properties which handle the fallback for you.
+    # properties which handle the fallback.
     test_subject_f1: float = -1.0
     test_subject_acc: float = -1.0
     test_subject_stress_recall: float = -1.0

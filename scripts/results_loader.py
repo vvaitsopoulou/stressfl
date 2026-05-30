@@ -45,7 +45,7 @@ import pandas as pd
 import seaborn as sns
 
 # --- Paths -------------------------------------------------------------------
-PROJECT_ROOT = Path(".")  # adjust if you run this from a sub-directory
+PROJECT_ROOT = Path(".")
 RESULTS_BASE = PROJECT_ROOT / "results"
 ARTEFACTS = PROJECT_ROOT / "artefacts" / "iter1"
 ARTEFACTS.mkdir(parents=True, exist_ok=True)
