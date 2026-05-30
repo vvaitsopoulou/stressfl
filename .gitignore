@@ -1,5 +1,4 @@
 # PYTHON & CORE
-
 __pycache__/
 *.py[codz]
 *$py.class
@@ -24,7 +23,6 @@ share/python-wheels/
 MANIFEST
 
 # VIRTUAL ENVIRONMENTS
-
 venv/
 env/
 ENV/
@@ -33,34 +31,27 @@ venv.bak/
 .venv/
 
 # IDEs & AI TOOLS
-
 # Cursor (AI Editor)
 .cursorignore
 .cursorindexingignore
-
 # VS Code
 .vscode/
 *.code-workspace
-
 # PyCharm / IntelliJ
 .idea/
 *.iml
 *.iws
 .idea_modules/
-
 # Ruff
 .ruff_cache/
-
 # Abstra
 .abstra/
 
 # DATASETS & SENSITIVE DATA
-
 # General Data Folders
 /data/
 !data/.gitkeep
 datasets/
-
 # WESAD Specifics
 data/raw/wesad/
 data/raw/WESAD/
@@ -68,12 +59,11 @@ wesad_data/
 *.zip
 *.7z
 *.rar
-
 # Fitbit/Personal Data (Privacy Critical)
 data/fitbit/
 fitbit_data/
 personal_data/
-
+fitbit_intraday_*.json
 # Physiological/Bio-Signal Formats
 *.pkl
 *.pickle
@@ -81,11 +71,14 @@ personal_data/
 *.npz
 *.h5
 *.hdf5
-*.mat   # Matlab bio-data
-*.edf   # European Data Format
-*.xdf   # Extensible Data Format
-*.csv   # Prevent accidental CSV commits
-
+# Matlab bio-data
+*.mat
+# European Data Format
+*.edf
+# Extensible Data Format
+*.xdf
+# Prevent accidental CSV commits
+*.csv
 # Processed/Interim Data
 data/processed/
 data/interim/
@@ -100,12 +93,10 @@ models/checkpoints/
 checkpoints/
 saved_models/
 !models/.gitkeep
-
 # Mobile/Edge Formats (For Demo App)
 *.tflite
 *.onnx
 *.pb
-
 # PyInstaller
 *.manifest
 *.spec
@@ -121,23 +112,25 @@ updates/
 # Weights and Biases
 wandb/
 .wandb/
-
 # MLflow
 mlruns/
 .mlflow/
-
 # TensorBoard
 runs/
 logs/
 tensorboard/
 *.tfevents.*
-
 # Experiment outputs
 outputs/
 results/
 experiments/
+artefacts/
+production_downloads/
 *.log
 *.out
+# Generated figures / dumps (regenerable)
+fitbit_prediction_timeline.png
+project_file_structure.txt
 
 # JUPYTER NOTEBOOKS
 .ipynb_checkpoints
