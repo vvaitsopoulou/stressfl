@@ -528,7 +528,7 @@ def plot_personalisation_gain(
         color="#4477AA",
         linewidth=1.5,
         linestyle="--",
-        label=f"Mean gain: {np.mean(gains):+.3f}",
+        label=f"Mean gain: {np.mean(gains):+.4f}",
     )
 
     ax.set_xticks(x)
