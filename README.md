@@ -98,7 +98,7 @@ This project explores how Federated Learning (FL) combined with personalization 
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/federated-stress-prediction.git
+   git clone https://github.com/vvaitsopoulou/stressfl.git
    cd federated-stress-prediction
    ```
 
@@ -248,12 +248,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 }
 ```
 - **Federated Learning:** Inspired by research from Google, OpenMined, and the FL community
-- **Supervisor:** [Your Supervisor's Name]
+- **Supervisor:** [Miltos Vafiadis]
 
 ## 📧 Contact
 
 **Vasiliki Anna Vaitsopoulou**
-- Email: vvaitsopoulou@york.citycollege.eu
+- Email: vvaitsopoulou@york.citycollege.eu / vaisanna97@gmail.com
 - LinkedIn: [[vasiliki-anna-vaitsopoulou](https://www.linkedin.com/in/vasiliki-anna-vaitsopoulou-b23bb8303/)]
 - Project Link: https://github.com/vvaitsopoulou/stressfl
  

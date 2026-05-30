@@ -259,7 +259,7 @@ When adding new code, follow the existing structure:
 
 Feel free to:
 - Open an issue for questions
-- Reach out via email: your.email@example.com
+- Reach out via email: vaisanna97@gmail.com
 - Check the [Discussions](https://github.com/vvaitsopoulou/stressfl/discussions) tab
 
 ## 🙏 Acknowledgments
