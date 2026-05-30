@@ -45,7 +45,6 @@ class AccPreprocessing:
         self.wrist = wrist
 
     def process(self):
-        # Return the dataframe with all ACC axes filtered.
         if self.wrist:
             cols = self._WRIST_COLS
             filter_fn = self._fir_lowpass

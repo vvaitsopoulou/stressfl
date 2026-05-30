@@ -30,7 +30,6 @@ class BVPPreprocessing:
         self._was_series = False
 
     def process(self):
-        # Return the dataframe with the bvp column cleaned.
         if isinstance(self.df, pd.Series):
             self._was_series = True
             self.df = pd.DataFrame(self.df, columns=[self.COLUMN])

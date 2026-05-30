@@ -21,7 +21,6 @@ import pandas as pd
 
 
 class EDAPreprocessing:
-    # Clean an EDA signal using NeuroKit2.
     def __init__(
         self,
         df,
@@ -37,7 +36,6 @@ class EDAPreprocessing:
         self._was_series = False
 
     def process(self):
-        # Return the dataframe with the EDA column cleaned
         if isinstance(self.df, pd.Series):
             self._was_series = True
             self.df = pd.DataFrame(self.df, columns=[self.column])
