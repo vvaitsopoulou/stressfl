@@ -414,10 +414,8 @@ The Noun Project royalty-free licence (CC BY) requires attribution, which is pro
 SVG source files (both files retain the embedded
 `<text>Created by … from Noun Project</text>` element, preserved at the file level even
 though it is not rendered in the gauge) and in the `MoodIcon` component header (which names
-both creators, the source filenames, and the licence URL). A corresponding credit line should
-be included in the written report, for example: "Mood icons in the live dashboard are adapted
-from the Noun Project: smiley face by Kero, frown face by White Spaces Inc.; both used under
-the Noun Project royalty-free licence (CC BY)."
+both creators, the source filenames, and the licence URL). A corresponding credit line is 
+included in the written report.
 
 ## Known limitations and future work
 
