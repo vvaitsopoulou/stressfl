@@ -12,7 +12,7 @@
 
 This repository contains the code accompanying a BSc dissertation. The project addresses a practical question: whether a stress-detection model trained on research-grade laboratory sensors can be adapted to operate on a consumer wristband suitable for everyday use, without ever centralising participants' physiological data.
 
-The repository is research code. It was developed across three iterations, and several components are driven by configuration files rather than a unified command-line interface. Two experiments were deliberately omitted for scope; these are noted below. Throughout, we have tried to document clearly what the system does and does not do.
+The repository is research code. It was developed across three iterations, and several components are driven by configuration files rather than a unified command-line interface. Two experiments were deliberately omitted for scope: these are noted below. Throughout, we have tried to document clearly what the system does and does not do.
 
 ## Overview
 
@@ -22,13 +22,13 @@ The work proceeds in three stages, each building on the previous one.
 
 2. **Federated learning, one client per subject.** Rather than training on pooled data, each of the fifteen subjects is treated as a separate client, and the raw signals never leave the client. We implemented and compared four approaches — FedAvg, FedRep, BABU, and PeFLL, the last of which learns a hypernetwork that generates per-client model weights — against the centralised baseline. The per-subject results are the most informative: several folds that the centralised model handled well (S9, S13, S14) are precisely where personalization provides the clearest benefit.
 
-3. **Distillation to a consumer device.** A Fitbit Charge 6 offers little beyond heart rate; it has neither a chest strap nor the sensing range of a research-grade wristband. The federated model therefore serves as a teacher, and knowledge distillation is used to train a compact student that requires only the features a Fitbit can supply. The student is then evaluated against intraday Charge 6 recordings. This is the bridge referred to in the title: the federated model is the research-grade artefact, and the distilled student is the form that could plausibly run on consumer hardware.
+3. **Distillation to a consumer device.** A Fitbit Charge 6 offers little beyond heart rate: it has neither a chest strap nor the sensing range of a research-grade wristband. The federated model therefore serves as a teacher, and knowledge distillation is used to train a compact student that requires only the features a Fitbit can supply. The student is then evaluated against intraday Charge 6 recordings. This is the bridge referred to in the title: the federated model is the research-grade artefact, and the distilled student is the form that could plausibly run on consumer hardware.
 
-A live demonstration dashboard (FastAPI and React) streams predictions over a WebSocket. It is a prototype and remains under development; see the closing note.
+A live demonstration dashboard (FastAPI and React) streams predictions over a WebSocket.
 
 ## Project structure
 
-The reconstructed layout is given below; run `git ls-files` for the exact current tree.
+The reconstructed layout is given below: run `git ls-files` for the exact current tree.
 
 ```
 .
@@ -109,7 +109,7 @@ WESAD is not redistributable and must be obtained directly from the [UCI reposit
 
 ## Reproducing the experiments
 
-Most preprocessing and training stages can be run as modules. Only CNN-LSTM training and the classical windowing step expose a full command-line interface; the remaining stages read their settings from the configuration files described above.
+Most preprocessing and training stages can be run as modules. Only CNN-LSTM training and the classical windowing step expose a full command-line interface. The remaining stages read their settings from the configuration files described above.
 
 **Data preparation** (extract, resample and merge, then window):
 
@@ -132,7 +132,7 @@ python -m src.training.wesad_cnnlstm_train \
 python -m src.training.wesad_cnnlstm_evaluate
 ```
 
-**Iteration 2 — federated learning.** Each run is specified in `src/utils/fl_config.py` (algorithm, number of rounds, client split); the clients and servers under `src/fl/` are driven from that configuration rather than from command-line arguments.
+**Iteration 2 — federated learning.** Each run is specified in `src/utils/fl_config.py` (algorithm, number of rounds, client split). The clients and servers under `src/fl/` are driven from that configuration rather than from command-line arguments.
 
 **Iteration 3 — distillation and Fitbit evaluation.** The paired teacher/student data are generated first, the student is then trained against the loaded teacher checkpoints, and the result is evaluated on the Fitbit data. Distillation settings are defined in `src/kd/kd_config.py`.
 
@@ -147,9 +147,9 @@ Where a stage does not expose a command-line entry point, the analysis notebooks
 
 ## Results
 
-Detailed results, figures, and the per-subject analysis are reported in `docs/` and in the dissertation rather than here, so that this document need not be revised after each run. In summary, federated personalization recovers most of the centralised LOSO performance while keeping data on-device, and the distilled student performs well enough on Fitbit-derived features to support the feasibility of the proposed bridge.
+Detailed results, figures, and the per-subject analysis are reported in the dissertation rather than here, so that this document need not be revised after each run. In summary, federated personalization recovers most of the centralised LOSO performance while keeping data on-device, and the distilled student performs well enough on Fitbit-derived features to support the feasibility of the proposed bridge.
 
-Two limitations should be stated plainly. The chest deep-learning baseline was not run to completion — only a single fold exists — and was excluded on the grounds that the literature consistently reports a small chest-versus-wrist performance gap and that the wrist is the intended deployment target. In addition, the dashboard currently uses a synthetic data source; the replay and live Fitbit feeds are stubbed rather than implemented.
+Two limitations should be stated plainly. The chest deep-learning baseline was not run to completion — only a single fold exists — and was excluded on the grounds that the literature consistently reports a small chest-versus-wrist performance gap and that the wrist is the intended deployment target. In addition, the dashboard currently uses a synthetic data source: the replay and live Fitbit feeds are stubbed rather than implemented.
 
 ## Acknowledgments
 
@@ -165,7 +165,7 @@ This work relies on the WESAD dataset:
 }
 ```
 
-The federated and distillation methods draw on the FedAvg, FedRep, BABU, and PeFLL literature; the PeFLL hypernetwork formulation in particular informed the design of the personalized variant. We thank our supervisor, Miltos Vafiadis, for guidance on the scope of the project.
+The federated and distillation methods draw on the FedAvg, FedRep, BABU, and PeFLL literature. The PeFLL hypernetwork formulation in particular informed the design of the personalized variant. I thank my supervisor, Miltos Vafiadis, for guidance on the scope of the project.
 
 ## License
 
