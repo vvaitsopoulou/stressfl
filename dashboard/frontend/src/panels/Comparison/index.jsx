@@ -1,13 +1,10 @@
 /**
- * ComparisonPanel — Panel 2, "Why does personalisation matter?"
+ * ComparisonPanel — Panel 2, three-model comparison.
  *
- * This is the panel the dissertation depends on. It needs to make
- * three points visually:
- *
- *   1. The three models disagree (stacked timelines)
- *   2. Personalised is more confident and stable (running metric cards)
- *   3. The disagreement clusters in interesting places (diff chart)
- *      — a live proxy for the offline "personalisation gain" claim
+ * Shows the three students side by side:
+ *   1. The three model timelines (stacked, shared x-axis)
+ *   2. Running confidence/stability metric cards
+ *   3. A live disagreement chart between models
  */
 
 import { Box, Card, Typography } from '@mui/material';
@@ -254,7 +251,7 @@ function DisagreementChart({ predictionBuffer }) {
         Disagreement with personalised
       </Typography>
       <Typography variant="caption" sx={{ color: COLORS.textMuted, display: 'block', mb: 2 }}>
-        |Δ P(stress)| from headline model · live proxy for personalisation gain
+        |Δ P(stress)| from headline model · live pairwise difference
       </Typography>
       <Box sx={{ width: '100%', height: 200 }}>
         <ResponsiveContainer>
@@ -320,35 +317,38 @@ function DisagreementChart({ predictionBuffer }) {
   );
 }
 
-function PersonalisationGainPlaceholder() {
+function DomainShiftNote() {
   return (
     <PanelCard sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <Typography variant="overline" sx={{ color: COLORS.textMuted, letterSpacing: 1.5 }}>
-        Personalisation gain by phase
+        Reading this session
       </Typography>
       <Typography variant="caption" sx={{ color: COLORS.textMuted, display: 'block', mb: 2 }}>
-        Δ macro-F1 (personalised − global) · loaded from offline ablation
+        N = 1 · single-participant feasibility
       </Typography>
       <Box
         sx={{
           flex: 1,
           minHeight: 200,
-          border: `1px dashed ${COLORS.bgCardEdge}`,
+          border: `1px solid ${COLORS.bgCardEdge}`,
           borderRadius: '12px',
           display: 'flex',
           flexDirection: 'column',
-          alignItems: 'center',
           justifyContent: 'center',
-          gap: 1,
-          p: 2,
+          gap: 1.5,
+          p: 3,
         }}
       >
-        <Typography variant="caption" sx={{ color: COLORS.textMuted, textAlign: 'center' }}>
-          Reserved slot — wired to static results in a future session.
+        <Typography variant="body2" sx={{ color: COLORS.textPrimary }}>
+          On this participant's wrist-HR session, all three students predict
+          low stress throughout — the timelines overlap rather than diverge.
         </Typography>
-        <Typography variant="caption" sx={{ color: COLORS.textMuted, textAlign: 'center', maxWidth: 400 }}>
-          Will display per-phase Δ macro-F1 bars from <code>plot_personalisation_gain</code>.
-          Live proxy is the disagreement chart on the left.
+        <Typography variant="caption" sx={{ color: COLORS.textMuted }}>
+          The students were distilled from chest-ECG features; applied to
+          Fitbit-derived HRV, the inputs fall outside the training
+          distribution, so personalisation has little to recover here. This
+          domain-shift behaviour is the result of interest, not a fault — see
+          the offline evaluation for the matched per-phase metrics.
         </Typography>
       </Box>
     </PanelCard>
@@ -436,7 +436,7 @@ export default function ComparisonPanel() {
         <DisagreementChart predictionBuffer={predictionBuffer} />
       </Box>
       <Box sx={{ gridArea: 'gain' }}>
-        <PersonalisationGainPlaceholder />
+        <DomainShiftNote />
       </Box>
       <Box sx={{ gridArea: 'cal' }}>
         <CalibrationFooter hello={hello} />
@@ -450,7 +450,7 @@ export default function ComparisonPanel() {
 
   return (
     <DashboardLayout>
-      <DashboardNavbar title="Comparison · Why personalisation matters">
+      <DashboardNavbar title="Comparison · Three models, same session">
         <ConnectionBadge state={connectionState} dataSource={hello?.data_source} />
       </DashboardNavbar>
       {content}

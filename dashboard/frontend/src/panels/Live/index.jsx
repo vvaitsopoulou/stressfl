@@ -81,6 +81,26 @@ function ConnectionBadge({ state, dataSource }) {
   );
 }
 
+function SourceToggle({ source, setSource }) {
+  const isReplay = source === 'replay';
+  return (
+    <Chip
+      size="small"
+      onClick={() => setSource(isReplay ? 'mock' : 'replay')}
+      label={isReplay ? 'replay ▸ switch to mock' : 'mock ▸ switch to replay'}
+      sx={{
+        cursor: 'pointer',
+        bgcolor: 'transparent',
+        border: `1px solid ${isReplay ? COLORS.violet : COLORS.cyan}`,
+        color: isReplay ? COLORS.violet : COLORS.cyan,
+        fontWeight: 600,
+        letterSpacing: '0.5px',
+        '&:hover': { bgcolor: 'rgba(255,255,255,0.04)' },
+      }}
+    />
+  );
+}
+
 function StressGauge({ pStress, qualityPass }) {
 
   const SIZE = 200;
@@ -640,6 +660,8 @@ export default function LivePanel() {
     latestPrediction,
     latestQuality,
     events,
+    source,
+    setSource,
   } = state;
 
   const headlineP = latestPrediction?.models?.[HEADLINE_MODEL_ID]?.p_stress;
@@ -683,7 +705,10 @@ export default function LivePanel() {
   return (
     <DashboardLayout>
       <DashboardNavbar title="Live · What's happening now">
-        <ConnectionBadge state={connectionState} dataSource={hello?.data_source} />
+        <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
+          <SourceToggle source={source} setSource={setSource} />
+          <ConnectionBadge state={connectionState} dataSource={hello?.data_source} />
+        </Box>
       </DashboardNavbar>
       {content}
     </DashboardLayout>

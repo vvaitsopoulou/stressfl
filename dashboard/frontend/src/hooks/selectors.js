@@ -20,6 +20,10 @@ export function selectPerModelSeries(predictionBuffer) {
       });
     }
   }
+  // Defensive: render strictly left-to-right by time. Any out-of-order
+  // point (a late message, or a residual from a previous session) would
+  // otherwise make the line jump backward and smear across the chart.
+  for (const id of MODEL_IDS) out[id].sort((a, b) => a.t - b.t);
   return out;
 }
 
@@ -90,5 +94,6 @@ export function selectMeanAbsDiff(predictionBuffer, modelA, modelB) {
       diff: Math.abs(a - b),
     });
   }
+  out.sort((a, b) => a.t - b.t);
   return out;
 }

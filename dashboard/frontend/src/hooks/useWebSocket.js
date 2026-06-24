@@ -10,13 +10,19 @@
  *      everything since session start.
  *
  * Reconnect strategy:
- *   Exponential backoff capped at 30 s, per the spec. We do NOT
- *   replay the last hello on reconnect (the server sends a fresh one
- *   automatically), but we do clear all buffers, a reconnect means
- *   a new session boundary, so showing stale data would be misleading.
+ *   Exponential backoff capped at 30 s. We do NOT replay the last hello on
+ *   reconnect (the server sends a fresh one). We clear buffers on each new
+ *   connection, since a reconnect is a new session boundary.
+ *
+ * Connection identity:
+ *   The current `url` lives in a ref, and reconnects ALWAYS read that ref —
+ *   never a captured value. Combined with a per-connection generation id,
+ *   this guarantees that when `url` changes (e.g. the source toggle), no
+ *   in-flight reconnect timer can resurrect a socket to the OLD url, and
+ *   stale sockets can't stack up. (This was the mock-leak bug.)
  */
 
-import { useEffect, useReducer, useRef, useCallback } from 'react';
+import { useEffect, useReducer, useRef } from 'react';
 import { MSG } from 'protocol';
 
 const HR_BUFFER_SEC = 300;             // 5 minutes of HR
@@ -25,22 +31,13 @@ const PREDICTION_BUFFER_WINDOWS = 600; // ~80 minutes at 8 s slide
 // Reducer
 
 const initialState = {
-  // Connection
   connectionState: 'idle',     // 'idle' | 'connecting' | 'open' | 'closed' | 'error'
   reconnectAttempts: 0,
-
-  // From hello
   hello: null,
-
-  // High-volume streams
   hrBuffer: [],
   predictionBuffer: [],
-
-  // Latest of each
   latestPrediction: null,
   latestQuality: null,
-
-  // System events log
   events: [],
 };
 
@@ -65,7 +62,17 @@ function reducer(state, action) {
       const msg = action.message;
       switch (msg.type) {
         case MSG.HELLO:
-          return { ...state, hello: msg };
+          // A hello marks a fresh session boundary. Reset all stream
+          // buffers so data from a previous source (e.g. mock) can never
+          // bleed into the new session's charts.
+          return {
+            ...state,
+            hello: msg,
+            hrBuffer: [],
+            predictionBuffer: [],
+            latestPrediction: null,
+            latestQuality: null,
+          };
 
         case MSG.HR_SAMPLE: {
           const next = state.hrBuffer.concat(msg.samples);
@@ -76,15 +83,18 @@ function reducer(state, action) {
         }
 
         case MSG.PREDICTION: {
-          const next = state.predictionBuffer.concat([msg]);
-          const trimmed = next.length > PREDICTION_BUFFER_WINDOWS
-            ? next.slice(next.length - PREDICTION_BUFFER_WINDOWS)
-            : next;
-          return {
-            ...state,
-            predictionBuffer: trimmed,
-            latestPrediction: msg,
-          };
+          // Keep exactly one entry per window_id (last wins) and sorted by
+          // time. Makes a backward-jumping / smeared line structurally
+          // impossible for every consumer (Live, Comparison, gauge).
+          const byId = new Map();
+          for (const p of state.predictionBuffer) byId.set(p.window_id, p);
+          byId.set(msg.window_id, msg);
+          let merged = Array.from(byId.values())
+            .sort((a, b) => a.window_start_s - b.window_start_s);
+          if (merged.length > PREDICTION_BUFFER_WINDOWS) {
+            merged = merged.slice(merged.length - PREDICTION_BUFFER_WINDOWS);
+          }
+          return { ...state, predictionBuffer: merged, latestPrediction: msg };
         }
 
         case MSG.QUALITY_UPDATE:
@@ -119,100 +129,114 @@ export default function useWebSocket(url) {
 
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
-  const wantConnectionRef = useRef(true);
   const backoffRef = useRef(0);
 
-  // Connect function as a ref-stable callback.
-  const connect = useCallback(() => {
-    if (!wantConnectionRef.current) return;
+  // Always-current url, read by (re)connect. Never close over `url` directly.
+  const urlRef = useRef(url);
+  urlRef.current = url;
 
-    // Tear down any prior socket cleanly.
-    if (wsRef.current) {
-      try { wsRef.current.close(); } catch { /* ignore */ }
-      wsRef.current = null;
-    }
+  // Generation id: bumped every time the url changes / the effect re-runs.
+  // Any socket or timer from an older generation is ignored and discarded,
+  // so a stale reconnect can never open a socket to a previous url.
+  const genRef = useRef(0);
 
-    dispatch({ type: 'CONNECTION_STATE', value: 'connecting' });
-    dispatch({ type: 'CLEAR_SESSION' });
-
-    let ws;
-    try {
-      ws = new WebSocket(url);
-    } catch (err) {
-      console.error('WebSocket constructor failed:', err);
-      scheduleReconnect();
-      return;
-    }
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      dispatch({ type: 'CONNECTION_STATE', value: 'open' });
-      backoffRef.current = 0;
-    };
-
-    ws.onmessage = (ev) => {
-      let parsed;
-      try {
-        parsed = JSON.parse(ev.data);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('Bad JSON from server:', err, ev.data);
-        return;
-      }
-      dispatch({ type: 'MESSAGE', message: parsed });
-    };
-
-    ws.onerror = (ev) => {
-      // eslint-disable-next-line no-console
-      console.warn('WebSocket error:', ev);
-    };
-
-    ws.onclose = (ev) => {
-      // eslint-disable-next-line no-console
-      console.info('WebSocket closed:', ev.code, ev.reason || '(no reason)');
-      wsRef.current = null;
-      if (wantConnectionRef.current) {
-        dispatch({ type: 'CONNECTION_STATE', value: 'closed' });
-        scheduleReconnect();
-      }
-    };
-  }, [url]);
-
-  const scheduleReconnect = useCallback(() => {
-    if (!wantConnectionRef.current) return;
-
-    const delays = [1000, 2000, 4000, 8000, 16000, 30000];
-    const idx = Math.min(backoffRef.current, delays.length - 1);
-    const delay = delays[idx];
-    backoffRef.current += 1;
-
-    dispatch({ type: 'RECONNECT_INCREMENT' });
-    // eslint-disable-next-line no-console
-    console.info(`Reconnecting in ${delay} ms (attempt ${backoffRef.current})`);
-
-    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-    reconnectTimerRef.current = setTimeout(() => {
-      reconnectTimerRef.current = null;
-      connect();
-    }, delay);
-  }, [connect]);
-
-  // Connect on mount, tear down on unmount.
   useEffect(() => {
-    wantConnectionRef.current = true;
-    connect();
-    return () => {
-      wantConnectionRef.current = false;
+    const myGen = ++genRef.current;
+
+    const isStale = () => myGen !== genRef.current;
+
+    const clearTimer = () => {
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
+    };
+
+    const closeSocket = () => {
       if (wsRef.current) {
-        try { wsRef.current.close(); } catch { /* ignore */ }
+        // Detach handlers first so the close doesn't trigger a reconnect.
+        const old = wsRef.current;
+        old.onopen = old.onmessage = old.onerror = old.onclose = null;
+        try { old.close(); } catch { /* ignore */ }
         wsRef.current = null;
       }
     };
-  }, [connect]);
+
+    const scheduleReconnect = () => {
+      if (isStale()) return;
+      const delays = [1000, 2000, 4000, 8000, 16000, 30000];
+      const idx = Math.min(backoffRef.current, delays.length - 1);
+      const delay = delays[idx];
+      backoffRef.current += 1;
+      dispatch({ type: 'RECONNECT_INCREMENT' });
+      console.info(`Reconnecting in ${delay} ms (attempt ${backoffRef.current})`);
+      clearTimer();
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (!isStale()) connect();
+      }, delay);
+    };
+
+    function connect() {
+      if (isStale()) return;
+      clearTimer();
+      closeSocket();
+
+      dispatch({ type: 'CONNECTION_STATE', value: 'connecting' });
+      dispatch({ type: 'CLEAR_SESSION' });
+
+      let ws;
+      try {
+        // Read the CURRENT url from the ref, never a captured value.
+        ws = new WebSocket(urlRef.current);
+      } catch (err) {
+        console.error('WebSocket constructor failed:', err);
+        scheduleReconnect();
+        return;
+      }
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (isStale()) { try { ws.close(); } catch { /* ignore */ } return; }
+        dispatch({ type: 'CONNECTION_STATE', value: 'open' });
+        backoffRef.current = 0;
+      };
+
+      ws.onmessage = (ev) => {
+        if (isStale()) return;
+        let parsed;
+        try {
+          parsed = JSON.parse(ev.data);
+        } catch (err) {
+          console.error('Bad JSON from server:', err, ev.data);
+          return;
+        }
+        dispatch({ type: 'MESSAGE', message: parsed });
+      };
+
+      ws.onerror = (ev) => {
+        console.warn('WebSocket error:', ev);
+      };
+
+      ws.onclose = (ev) => {
+        console.info('WebSocket closed:', ev.code, ev.reason || '(no reason)');
+        if (wsRef.current === ws) wsRef.current = null;
+        if (!isStale()) {
+          dispatch({ type: 'CONNECTION_STATE', value: 'closed' });
+          scheduleReconnect();
+        }
+      };
+    }
+
+    connect();
+
+    return () => {
+      // Invalidate this generation: any pending timer or late event no-ops.
+      genRef.current++;
+      clearTimer();
+      closeSocket();
+    };
+  }, [url]);
 
   return state;
 }

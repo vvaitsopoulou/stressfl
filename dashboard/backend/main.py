@@ -2,25 +2,26 @@
 
 One endpoint: GET /ws/live  →  WebSocket that streams the v1 protocol.
 
-The data source is selected via an env var:
-    DATA_SOURCE=mock   (default — synthetic generator)
-    DATA_SOURCE=replay (not implemented yet)
-    DATA_SOURCE=fitbit (not implemented yet)
+The data source is selected per-connection. Priority:
+    1. ?source= query param on the WebSocket URL  (the dashboard toggle)
+    2. DATA_SOURCE env var
+    3. "mock" (default)
 
-There's also a tiny GET /health endpoint for sanity-checking the server
-is up without opening a WebSocket.
+Recognised sources:
+    mock    — synthetic generator (default)
+    replay  — pre-recorded Fitbit pilot, real models   (env-configurable)
+    fitbit  — live Fitbit (not implemented yet)
 
-Per-connection lifecycle:
-  1. Client connects to /ws/live.
-  2. Server constructs a fresh DataSource for that connection.
-  3. Server iterates source.stream(), serialising and sending each
-     message as a single JSON frame.
-  4. On disconnect (client close, server shutdown, or any error), the
-     stream task is cancelled, which propagates CancelledError into
-     the source's asyncio.sleep and lets it clean up.
+Replay configuration (env vars, read per-connection):
+    REPLAY_JSON_PATH        path to the Fitbit intraday JSON
+                            (default: data/fitbit/fitbit_intraday_2026-05-03.json)
+    REPLAY_CHECKPOINT_DIR   dir holding kd_global_best.pt / no_kd_global_best.pt
+                            (default: KD_CHECKPOINT_DIR_CEN from kd_config)
+    REPLAY_TIME_SCALE       1.0 = real-time (default); >1 compresses for rehearsal
 
-There is no client→server message handling in v1
-We don't read from the socket — only write.
+There is no client→server message handling in v1. We don't read from the
+socket — only write. The toggle works by reconnecting with a new
+?source= value, not by sending a control message.
 """
 
 from __future__ import annotations
@@ -45,22 +46,45 @@ logging.basicConfig(
 # Source selection
 
 
-def make_source() -> DataSource:
-    """Construct a DataSource based on env vars.
+def make_source(source: str | None = None) -> DataSource:
+    """Construct a DataSource. Called once per WebSocket connection.
 
-    Per-connection called once for each new WebSocket.
+    Parameters
+    ----------
+    source : str | None
+        Per-connection override (from the ?source= query param). If None,
+        falls back to the DATA_SOURCE env var, then "mock".
     """
-    kind = os.environ.get("DATA_SOURCE", "mock").lower()
+    kind = (source or os.environ.get("DATA_SOURCE", "mock")).lower()
+
     if kind == "mock":
         # MOCK_TIME_SCALE lets devs run faster than real-time. e.g.
         # MOCK_TIME_SCALE=10 = 10 sim seconds per wall-clock second.
         time_scale = float(os.environ.get("MOCK_TIME_SCALE", "1.0"))
         seed = int(os.environ.get("MOCK_SEED", "42"))
         return MockSource(seed=seed, time_scale=time_scale)
-    if kind in ("replay", "fitbit"):
-        raise NotImplementedError(
-            f"DATA_SOURCE={kind} is not implemented yet. Use DATA_SOURCE=mock."
+
+    if kind == "replay":
+        # Lazy import: only pull in torch / src.kd when replay is requested,
+        # so a mock-only server has no heavy dependencies at startup.
+        from backend.sources.replay import ReplaySource
+
+        json_path = os.environ.get(
+            "REPLAY_JSON_PATH", "data/fitbit/fitbit_intraday_2026-05-03.json"
         )
+        checkpoint_dir = os.environ.get("REPLAY_CHECKPOINT_DIR")  # None → kd_config default
+        time_scale = float(os.environ.get("REPLAY_TIME_SCALE", "1.0"))
+        return ReplaySource(
+            json_path=json_path,
+            checkpoint_dir=checkpoint_dir,
+            time_scale=time_scale,
+        )
+
+    if kind == "fitbit":
+        raise NotImplementedError(
+            f"DATA_SOURCE={kind} is not implemented yet. Use mock or replay."
+        )
+
     raise ValueError(f"Unknown DATA_SOURCE: {kind!r}")
 
 
@@ -108,13 +132,18 @@ async def ws_live(websocket: WebSocket) -> None:
     """Stream v1 protocol messages until client disconnects."""
     await websocket.accept()
     client = websocket.client
-    logger.info("WebSocket connected: %s", client)
+    source_param = websocket.query_params.get("source")
+    logger.info("WebSocket connected: %s (source=%s)", client, source_param)
 
     try:
-        source = make_source()
-    except (NotImplementedError, ValueError) as exc:
+        source = make_source(source_param)
+    except (NotImplementedError, ValueError, FileNotFoundError, RuntimeError) as exc:
         logger.error("Failed to construct data source: %s", exc)
-        await websocket.close(code=1011, reason=str(exc))
+        await websocket.close(code=1011, reason=str(exc)[:120])
+        return
+    except Exception:
+        logger.exception("Unexpected error constructing data source")
+        await websocket.close(code=1011, reason="source construction failed")
         return
 
     try:
